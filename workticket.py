@@ -62,46 +62,55 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
 
 def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
     """
-    分頁撈取 Sprint 內的所有工單 (修正 Endpoint 與合法 JQL)
+    使用新版 /rest/api/3/search/jql API 分頁撈取 Sprint 內的所有工單
     """
-    url = f"{domain.rstrip('/')}/rest/api/3/search"
+    url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
     
-    # 組合多種常見 Sprint 語法 (同時支援 ID 與名稱)
-    jql = f'sprint = {sprint_num} OR sprint = "AP Sprint {sprint_num}" OR sprint = "Sprint {sprint_num}" ORDER BY assignee ASC'
+    # 使用新版 API 的合法 JQL 語法
+    jql_options = [
+        f'sprint in ("AP Sprint {sprint_num}", "Sprint {sprint_num}", "{sprint_num}") ORDER BY assignee ASC',
+        f'sprint = {sprint_num} ORDER BY assignee ASC'
+    ]
     
     all_issues = []
-    start_at = 0
-    max_results = 100
     
-    while True:
-        payload = {
-            "jql": jql,
-            "startAt": start_at,
-            "maxResults": max_results,
-            "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
-        }
+    for jql in jql_options:
+        start_at = 0
+        max_results = 100
+        all_issues = []
         
-        response = requests.post(url, json=payload, headers=headers, auth=auth)
-        
-        if response.status_code == 200:
-            data = response.json()
-            issues = data.get('issues', [])
-            all_issues.extend(issues)
+        while True:
+            payload = {
+                "jql": jql,
+                "startAt": start_at,
+                "maxResults": max_results,
+                "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
+            }
             
-            total = data.get('total', len(all_issues))
-            start_at += len(issues)
+            response = requests.post(url, json=payload, headers=headers, auth=auth)
             
-            if start_at >= total or not issues:
+            if response.status_code == 200:
+                data = response.json()
+                issues = data.get('issues', [])
+                all_issues.extend(issues)
+                
+                total = data.get('total', len(all_issues))
+                start_at += len(issues)
+                
+                if start_at >= total or not issues:
+                    break
+            else:
                 break
-        else:
-            st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
+        
+        # 若成功撈取到工單則中斷嘗試
+        if all_issues:
             break
-            
+
     return all_issues
 
 def filter_and_group_by_dept(issues, department):
@@ -350,7 +359,7 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正撈取 Sprint {sprint_num} 的 [{department}] 成員工單..."):
+        with st.spinner(f"正透過新版 JQL API 撈取 Sprint {sprint_num} 的 [{department}] 成員工單..."):
             all_issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
             
             if all_issues:
