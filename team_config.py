@@ -1,6 +1,6 @@
-# =============================================================================
+# ==============================================================================
 # 公司組織架構成員設定檔 (Team Members Config)
-# =============================================================================
+# ==============================================================================
 
 TEAM_MEMBERS = {
     "QA": [
@@ -23,10 +23,8 @@ TEAM_MEMBERS = {
     "PM": [
         {"name": "Leo", "email": "Lo@intellianalyze.com"},
         {"name": "kira", "email": "Kir@intellianalyze.com"}
-    ]
+    ],
     "App": [
-        {"name": "Hank", "email": "hk@intellianalyze.com"},
-        {"name": "kira", "email": "ec@intellianalyze.com"}
+        {"name": "Hank", "email": "hk@intellianalyze.com"}
     ]
-    
 }
