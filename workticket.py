@@ -62,7 +62,7 @@ def fetch_user_profile(domain, email, token, account_id):
     url = f"{domain.rstrip('/')}/rest/api/3/user"
     auth = HTTPBasicAuth(email, token)
     headers = {"Accept": "application/json"}
-    params = {"accountId": account_id, "expand": "groups"}
+    params = {"accountId": account_id}
     
     try:
         res = requests.get(url, headers=headers, params=params, auth=auth)
@@ -102,7 +102,7 @@ def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
 
 def group_and_filter_issues(domain, email, token, issues, target_department, target_title):
     """
-    將 Issue 按 Assignee 分組，並查詢 Assignee Profile 進行部門與職稱過濾
+    嚴格過濾：必須在 User Profile 中填寫了對應的部門與職稱才納入
     """
     grouped = {}
     user_profile_cache = {}
@@ -117,19 +117,19 @@ def group_and_filter_issues(domain, email, token, issues, target_department, tar
         account_id = assignee_obj.get('accountId')
         display_name = assignee_obj.get('displayName', 'Unassigned')
         
-        # 查詢 Profile（使用快取避免重複 Request）
+        # 快取查詢 User Profile
         if account_id not in user_profile_cache:
             profile = fetch_user_profile(domain, email, token, account_id)
             user_profile_cache[account_id] = profile
         else:
             profile = user_profile_cache[account_id]
             
-        dept = profile.get("department", "")
-        job_title = profile.get("jobTitle", "")
+        dept = profile.get("department", "").strip()
+        job_title = profile.get("jobTitle", "").strip()
         
-        # 比對邏輯：若有填寫部門/職稱則進行比對（不區分大小寫），若 Profile 欄位為空則彈性保留
-        dept_match = not target_department or target_department.lower() in dept.lower() or dept == ""
-        title_match = not target_title or target_title.lower() in job_title.lower() or job_title == ""
+        # 嚴格判斷：Profile 必須要有值，且需包含指定的部門與職稱關鍵字
+        dept_match = bool(target_department) and (target_department.lower() in dept.lower())
+        title_match = bool(target_title) and (target_title.lower() in job_title.lower())
         
         if dept_match and title_match:
             if display_name not in grouped:
@@ -369,11 +369,11 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
                 if grouped_filtered:
                     st.session_state.jira_issues = issues
                     st.session_state.grouped_issues = grouped_filtered
-                    st.success(f"成功撈取工單！已根據 Profile 精準篩選出 {len(grouped_filtered)} 位 [{department} - {title}] 成員。")
+                    st.success(f"成功撈取！已根據 Profile 嚴格篩選出 {len(grouped_filtered)} 位 [{department} / {title}] 成員。")
                 else:
                     st.session_state.jira_issues = None
                     st.session_state.grouped_issues = None
-                    st.warning(f"在 Sprint {sprint_num} 中找不到 Profile 符合部門 '{department}' 且職稱包含 '{title}' 的成員工單。")
+                    st.warning(f"在 Sprint {sprint_num} 中找不到 Profile 明確填寫部門為 '{department}' 且職稱包含 '{title}' 的成員。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
