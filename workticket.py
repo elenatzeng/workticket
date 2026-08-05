@@ -124,7 +124,7 @@ def get_member_search_aliases(department, assignee_key):
     return list(set(aliases))
 
 def filter_and_group_by_dept(issues, department, sprint_num):
-    """根據部門成員與 Sprint 關鍵字比對工單"""
+    """根據部門成員與 Sprint 精確欄位比對工單"""
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
     
@@ -166,8 +166,15 @@ def filter_and_group_by_dept(issues, department, sprint_num):
                 is_in_dept = True
                 break
                 
-        issue_raw_str = str(issue)
-        has_sprint_match = (sprint_str in issue_raw_str)
+        # 精確比對 customfield_10020 (Sprint 欄位)，防止 Issue Key 誤撞數字
+        sprint_field = fields.get('customfield_10020')
+        has_sprint_match = False
+        if sprint_field and isinstance(sprint_field, list):
+            for s in sprint_field:
+                s_name = s.get('name', '') if isinstance(s, dict) else str(s)
+                if re.search(rf'\b{sprint_str}\b', s_name) or f"Sprint {sprint_str}" in s_name or f"sprint {sprint_str}" in s_name.lower():
+                    has_sprint_match = True
+                    break
         
         if is_in_dept and has_sprint_match:
             if matched_display_name not in grouped:
@@ -250,7 +257,7 @@ def render_copy_button(button_label, text_to_copy, button_id):
     components.html(html_code, height=45)
 
 def update_confluence_page_by_user(domain, email, token, space_key, title, grouped_issues, selected_assignees, current_sprint_num, department, parent_id=None):
-    """局部更新或補充工單至 Confluence（支援多名稱/別名精確比對）"""
+    """局部更新或補充工單至 Confluence（支援多名稱/別名精確比對與精確 Sprint 標題定位）"""
     auth = HTTPBasicAuth(email, token)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     
@@ -292,10 +299,8 @@ def update_confluence_page_by_user(domain, email, token, space_key, title, group
             first_col_text = cols[0].get_text().strip().lower()
             
             for assignee in selected_assignees:
-                # 取得該成員的所有比對別名（例如 ['ema', 'emma']）
                 aliases = get_member_search_aliases(department, assignee)
                 
-                #只要 Confluence 表格第一欄包含任一別名即算匹配成功
                 if any(alias in first_col_text for alias in aliases):
                     updated_count += 1
                     target_td = cols[1]
