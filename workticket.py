@@ -170,34 +170,31 @@ def format_estimate(timetracking):
         return f"估時：{days}D"
     return "待評估"
 
-def build_single_issue_li_html(issue):
-    """單純嵌入 jira 巨集，讓 Confluence 自動連動顯示標題與原生 Status 標籤"""
+def build_single_issue_li_html(issue, domain):
+    """直接生成 <a> 超連結，讓 Confluence 編輯器自行轉為原生 Smart Link 格式"""
     key = issue.get('key')
     fields = issue.get('fields', {})
     timetracking = fields.get('timetracking', {})
     estimate_str = format_estimate(timetracking)
     
-    jira_macro = f'<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">{key}</ac:parameter></ac:structured-macro>'
-    return f"<li>{jira_macro} {estimate_str}</li>"
+    jira_url = f"{domain.rstrip('/')}/browse/{key}"
+    return f'<li><a href="{jira_url}">{key}</a> {estimate_str}</li>'
 
-def generate_user_text_for_copy(issues, current_sprint_num):
-    """生成個人乾淨純文字格式"""
-    text = f"AP Sprint {current_sprint_num} :\n"
+def generate_user_text_for_copy(issues, domain):
+    """僅生成工單連結與估時的純文字（供一鍵複製貼上）"""
+    lines = []
     for issue in issues:
         key = issue.get('key')
         fields = issue.get('fields', {})
-        summary = fields.get('summary', '')
-        status_name = fields.get('status', {}).get('name', 'To Do')
         estimate_str = format_estimate(fields.get('timetracking', {}))
-        text += f"• [{key}] {summary} [{status_name}] {estimate_str}\n"
+        jira_url = f"{domain.rstrip('/')}/browse/{key}"
+        lines.append(f"{jira_url} {estimate_str}")
     
-    next_sprint_num = current_sprint_num + 1
-    text += f"\nAP Sprint {next_sprint_num} :\n(這個Sprint未完成，會延至下個Sprint)"
-    return text
+    return "\n".join(lines)
 
 def render_copy_button(button_label, text_to_copy, button_id):
-    """使用 JavaScript 打造直接複製到剪貼簿的實體按鈕"""
-    escaped_text = text_to_copy.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
+    """JavaScript 一鍵複製實體按鈕"""
+    escaped_text = text_to_copy.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$').replace('\n', '\\n')
     html_code = f"""
     <button id="btn_{button_id}" style="
         background-color: #4CAF50;
@@ -213,7 +210,7 @@ def render_copy_button(button_label, text_to_copy, button_id):
 
     <script>
     document.getElementById("btn_{button_id}").onclick = function() {{
-        const text = `{escaped_text}`;
+        const text = "{escaped_text}";
         navigator.clipboard.writeText(text).then(() => {{
             const btn = document.getElementById("btn_{button_id}");
             btn.innerText = "✓ 已複製！";
@@ -288,7 +285,7 @@ def update_confluence_page_by_user(domain, email, token, space_key, title, group
                             target_td.append(target_ul)
                             
                         for new_issue in new_issues_to_add:
-                            li_html = build_single_issue_li_html(new_issue)
+                            li_html = build_single_issue_li_html(new_issue, domain)
                             new_li_soup = BeautifulSoup(li_html, 'html.parser')
                             target_ul.append(new_li_soup)
                             added_issues_count += 1
@@ -448,7 +445,7 @@ if st.session_state.grouped_issues:
 
     for idx, assignee in enumerate(dept_assignees):
         issues = st.session_state.grouped_issues.get(assignee, [])
-        copy_text = generate_user_text_for_copy(issues, sprint_num)
+        copy_text = generate_user_text_for_copy(issues, atlassian_url)
         
         with st.expander(f"👤 {assignee} ({len(issues)} 筆進行中工單)", expanded=True):
             col_preview, col_action = st.columns([3, 1.2])
@@ -491,5 +488,5 @@ if st.session_state.grouped_issues:
                             else:
                                 st.error(msg)
                 
-                # 2. 一鍵複製按鈕（不顯示預覽框）
-                render_copy_button(f"📋 複製 {assignee} 文字", copy_text, f"copy_{idx}")
+                # 2. 僅複製工單 URL 與估時的按鈕
+                render_copy_button(f"📋 複製 {assignee} 工單連結", copy_text, f"copy_{idx}")
