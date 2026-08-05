@@ -101,6 +101,28 @@ def fetch_all_active_jira_issues(domain, email, token):
 
     return all_issues
 
+def get_member_search_aliases(department, assignee_key):
+    """取得特定成員在 Confluence 比對時的所有可能名稱（別名）"""
+    valid_members = TEAM_MEMBERS.get(department, [])
+    aliases = [assignee_key.lower()]
+    
+    for m in valid_members:
+        if isinstance(m, dict):
+            name = m.get('name', '').lower()
+            conf_name = m.get('confluence_name', '').lower()
+            email = m.get('email', '').lower()
+            
+            # 如果匹配 Jira 名字或 Email，將其所有別名納入搜尋清單
+            if assignee_key.lower() in [name, conf_name, email] or (email and assignee_key.lower() in email):
+                if name: aliases.append(name)
+                if conf_name: aliases.append(conf_name)
+                if email: aliases.append(email.split('@')[0])
+        elif isinstance(m, str):
+            if assignee_key.lower() == m.lower():
+                aliases.append(m.lower())
+                
+    return list(set(aliases))
+
 def filter_and_group_by_dept(issues, department, sprint_num):
     """根據部門成員與 Sprint 關鍵字比對工單"""
     grouped = {}
@@ -110,6 +132,7 @@ def filter_and_group_by_dept(issues, department, sprint_num):
     for m in valid_members:
         if isinstance(m, dict):
             if m.get('name'): member_keywords.append(m['name'].lower())
+            if m.get('confluence_name'): member_keywords.append(m['confluence_name'].lower())
             if m.get('email'): member_keywords.append(m['email'].lower())
         elif isinstance(m, str):
             member_keywords.append(m.lower())
@@ -226,8 +249,8 @@ def render_copy_button(button_label, text_to_copy, button_id):
     """
     components.html(html_code, height=45)
 
-def update_confluence_page_by_user(domain, email, token, space_key, title, grouped_issues, selected_assignees, current_sprint_num, parent_id=None):
-    """局部更新或補充工單至 Confluence（精確定位至目標 AP Sprint 標題列表）"""
+def update_confluence_page_by_user(domain, email, token, space_key, title, grouped_issues, selected_assignees, current_sprint_num, department, parent_id=None):
+    """局部更新或補充工單至 Confluence（支援多名稱/別名精確比對）"""
     auth = HTTPBasicAuth(email, token)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     
@@ -266,10 +289,14 @@ def update_confluence_page_by_user(domain, email, token, space_key, title, group
     for row in rows:
         cols = row.find_all('td')
         if len(cols) >= 2:
-            first_col_text = cols[0].get_text().strip()
+            first_col_text = cols[0].get_text().strip().lower()
             
             for assignee in selected_assignees:
-                if assignee.lower() in first_col_text.lower():
+                # 取得該成員的所有比對別名（例如 ['ema', 'emma']）
+                aliases = get_member_search_aliases(department, assignee)
+                
+                #只要 Confluence 表格第一欄包含任一別名即算匹配成功
+                if any(alias in first_col_text for alias in aliases):
                     updated_count += 1
                     target_td = cols[1]
                     
@@ -450,6 +477,7 @@ if st.session_state.grouped_issues:
                     grouped_issues=st.session_state.grouped_issues,
                     selected_assignees=selected_assignees,
                     current_sprint_num=sprint_num,
+                    department=department,
                     parent_id=selected_parent_id
                 )
                 if success:
@@ -499,6 +527,7 @@ if st.session_state.grouped_issues:
                                 grouped_issues=st.session_state.grouped_issues,
                                 selected_assignees=[assignee],
                                 current_sprint_num=sprint_num,
+                                department=department,
                                 parent_id=selected_parent_id
                             )
                             if success:
