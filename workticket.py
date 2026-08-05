@@ -62,31 +62,29 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
 
 def fetch_all_active_jira_issues(domain, email, token):
     """
-    抓取目前所有未完成 (To Do / In Progress) 的工單
+    使用相容性最高的 GET/POST API 方式抓取未完成 (To Do / In Progress) 工單
     """
-    url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
-    
     jql = 'statusCategory in ("To Do", "In Progress") ORDER BY assignee ASC'
     
     all_issues = []
     start_at = 0
     max_results = 100
     
+    # 優先嘗試 REST API v3 GET search (相容度最高)
+    url_get = f"{domain.rstrip('/')}/rest/api/3/search"
+    
     while True:
-        payload = {
+        params = {
             "jql": jql,
             "startAt": start_at,
             "maxResults": max_results,
-            "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020", "sprint"]
+            "fields": "summary,status,assignee,timetracking,issuetype,customfield_10020"
         }
         
-        response = requests.post(url, json=payload, headers=headers, auth=auth)
+        response = requests.get(url_get, params=params, auth=auth)
         
+        # 若 GET 成功
         if response.status_code == 200:
             data = response.json()
             issues = data.get('issues', [])
@@ -98,20 +96,41 @@ def fetch_all_active_jira_issues(domain, email, token):
             if start_at >= total or not issues:
                 break
         else:
-            st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
-            break
+            # 備援機制：嘗試 POST 方法（使用合規的 json payload）
+            url_post = f"{domain.rstrip('/')}/rest/api/3/search/jql"
+            headers = {"Accept": "application/json", "Content-Type": "application/json"}
+            payload = {
+                "jql": jql,
+                "startAt": start_at,
+                "maxResults": max_results,
+                "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020"]
+            }
+            res_post = requests.post(url_post, json=payload, headers=headers, auth=auth)
+            
+            if res_post.status_code == 200:
+                data = res_post.json()
+                issues = data.get('issues', [])
+                all_issues.extend(issues)
+                
+                total = data.get('total', len(all_issues))
+                start_at += len(issues)
+                
+                if start_at >= total or not issues:
+                    break
+            else:
+                st.error(f"Jira API 錯誤 ({res_post.status_code}): {res_post.text}")
+                break
 
     return all_issues
 
 def filter_and_group_by_dept(issues, department, sprint_num):
     """
-    1. 精確比對：根據 Jira 顯示名稱 (displayName) 或 Email 比對 Elena 等成員
-    2. 檢查 Sprint：工單的完整 JSON 內容或 Sprint 欄位中包含 Sprint 號碼 (例如 53)
+    1. 精確比對：根據 Jira 顯示名稱 (displayName) 或 Email 比對成員
+    2. 檢查 Sprint：工單包含 Sprint 號碼 (例如 53)
     """
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
     
-    # 提取設定檔中的所有關鍵字（包含 name 和 email）
     member_keywords = []
     for m in valid_members:
         if isinstance(m, dict):
@@ -136,7 +155,7 @@ def filter_and_group_by_dept(issues, department, sprint_num):
         if display_name:
             debug_found_assignees.add(display_name)
             
-        # 1. 人員比對：只要 displayName 或 email 包含 key (如 "elena")
+        # 1. 人員比對：只要 displayName 或 email 包含關鍵字 (例如 "elena")
         is_in_dept = False
         matched_display_name = display_name or email_address
         
@@ -145,7 +164,7 @@ def filter_and_group_by_dept(issues, department, sprint_num):
                 is_in_dept = True
                 break
                 
-        # 2. Sprint 比對：針對跨 Sprint (例如 AP Sprint 53 +4)，只要 JSON 代表字串中有數字 "53" 即可
+        # 2. Sprint 比對：只要 JSON 字串中包含數字 "53"
         issue_raw_str = str(issue)
         has_sprint_match = (sprint_str in issue_raw_str)
         
