@@ -3,7 +3,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 import html
 
-# 匯出獨立的團隊組織設定檔
+# 匯入團隊組織設定檔
 from team_config import TEAM_MEMBERS
 
 st.set_page_config(page_title="WorkTicket - Jira to Confluence 工具", layout="wide", page_icon="📋")
@@ -62,7 +62,7 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
 
 def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
     """
-    分頁撈取 Sprint 內的所有工單 (標準合法 JQL 語法，突破 100 筆上限)
+    分頁撈取 Sprint 內的所有工單 (支援模糊比對 Sprint 名稱)
     """
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
@@ -71,7 +71,8 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
         "Content-Type": "application/json"
     }
     
-    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+    # 放寬 JQL 搜尋：優先匹配包含數字的 Sprint (如 AP Sprint 53)
+    jql = f'sprint ~ "{sprint_num}" ORDER BY assignee ASC'
     
     all_issues = []
     start_at = 0
@@ -87,6 +88,11 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
         
         response = requests.post(url, json=payload, headers=headers, auth=auth)
         
+        # 若以文字搜尋失敗，退回精確比對
+        if response.status_code != 200 and start_at == 0:
+            payload["jql"] = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+            response = requests.post(url, json=payload, headers=headers, auth=auth)
+            
         if response.status_code == 200:
             data = response.json()
             issues = data.get('issues', [])
@@ -103,9 +109,13 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
             
     return all_issues
 
-def group_issues_by_assignee(issues):
-    """將工單依照受託人 (Assignee) 分組"""
+def filter_and_group_by_dept(issues, department):
+    """
+    嚴格過濾：僅保留 team_config.py 中指定部門名單內的成員工單
+    """
     grouped = {}
+    valid_members = TEAM_MEMBERS.get(department, [])
+    
     for issue in issues:
         fields = issue.get('fields', {})
         assignee_obj = fields.get('assignee')
@@ -115,10 +125,14 @@ def group_issues_by_assignee(issues):
             
         display_name = assignee_obj.get('displayName', 'Unassigned')
         
-        if display_name not in grouped:
-            grouped[display_name] = []
-        grouped[display_name].append(issue)
+        # 嚴格比對：只留下 displayName 包含 team_config.py 該部門成員名字的人
+        is_in_dept = any(member.lower() in display_name.lower() for member in valid_members)
         
+        if is_in_dept:
+            if display_name not in grouped:
+                grouped[display_name] = []
+            grouped[display_name].append(issue)
+            
     return grouped
 
 def get_status_color(status_name):
@@ -341,38 +355,35 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正完整分頁撈取 AP Sprint {sprint_num} 所有工單..."):
-            issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
+        with st.spinner(f"正撈取 Sprint {sprint_num} 的 [{department}] 成員工單..."):
+            all_issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
             
-            if issues:
-                grouped = group_issues_by_assignee(issues)
-                st.session_state.jira_issues = issues
-                st.session_state.grouped_issues = grouped
-                st.success(f"🎉 成功撈取整個 Sprint 共 {len(issues)} 筆工單！對照 team_config.py 進行成員預設勾選。")
+            if all_issues:
+                # 僅篩選出屬於該部門 (例如 QA) 名單中的成員工單
+                grouped_dept_issues = filter_and_group_by_dept(all_issues, department)
+                
+                if grouped_dept_issues:
+                    st.session_state.jira_issues = all_issues
+                    st.session_state.grouped_issues = grouped_dept_issues
+                    st.success(f"🎉 成功撈取！已篩選出 {len(grouped_dept_issues)} 位 [{department}] 成員之工單。")
+                else:
+                    st.session_state.jira_issues = None
+                    st.session_state.grouped_issues = None
+                    st.warning(f"在 Sprint {sprint_num} 的工單中，找不到團隊設定檔 (`team_config.py`) 內指定的 [{department}] 成員。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
-                st.warning(f"在 Jira 中找不到 Sprint 號碼為 '{sprint_num}' 的工單。")
+                st.warning(f"在 Jira 中找不到包含 Sprint 號碼為 '{sprint_num}' 的工單。")
 
 # 呈現選擇成員與排版預覽
 if st.session_state.grouped_issues:
-    all_assignees = sorted(list(st.session_state.grouped_issues.keys()))
-    
-    # 讀取 team_config.py 設定檔中該部門的成員名單
-    config_dept_members = TEAM_MEMBERS.get(department, [])
-    
-    # 計算預設勾選：比對目前 Jira 受託人名字中是否包含設定檔名稱（例如 Elena）
-    default_selected = [a for a in all_assignees if any(member.lower() in a.lower() for member in config_dept_members)]
-    
-    # 若對照表成員在目前 Sprint 中均無工單，則預設全選
-    if not default_selected:
-        default_selected = all_assignees
+    dept_assignees = sorted(list(st.session_state.grouped_issues.keys()))
 
     st.subheader("👥 選擇要上傳/匯出的受託人 (Assignees)")
     selected_assignees = st.multiselect(
-        f"系統已根據 team_config.py 自動為您勾選『{department}』成員，您仍可在此自由調整：",
-        options=all_assignees,
-        default=default_selected
+        f"目前僅顯示 `team_config.py` 中 [{department}] 的成員，請勾選要發布的人員：",
+        options=dept_assignees,
+        default=dept_assignees
     )
     
     if selected_assignees:
