@@ -27,6 +27,8 @@ TEAM_MEMBERS = {
     ],
     "App": [
         {"name": "Hank", "email": "hk@intellianalyze.com"},
-        {"name": "Eric", "email": "ec@intellianalyze.com"}
+        {"name": "Eric", "email": "ec@intellianalyze.com"},
+        {"name": "Luigi", "email": "Luigi@intellianalyze.com"},
+        {"name": "cw", "email": "cw@intellianalyze.com", "confluence_name": "Chien"},
     ]
 }
