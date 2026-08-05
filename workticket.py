@@ -62,7 +62,7 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
 
 def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
     """
-    使用新版 /rest/api/3/search/jql API 分頁撈取 Sprint 內的所有工單
+    使用萬用 JQL 撈取，支援各種 Sprint 命名變體 (如 ALL - AP Sprint 53 / AP Sprint 53 / Sprint 53)
     """
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
@@ -71,25 +71,27 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
         "Content-Type": "application/json"
     }
     
-    # JQL 搜尋組合
-    jql_options = [
-        f'sprint in ("AP Sprint {sprint_num}", "Sprint {sprint_num}", "{sprint_num}") ORDER BY assignee ASC',
-        f'sprint = {sprint_num} ORDER BY assignee ASC'
+    # 多重 JQL 嘗試序列，應對不同 Jira Project 設定
+    jql_queries = [
+        f'sprint in openSprints() ORDER BY assignee ASC',
+        f'sprint ~ "{sprint_num}" ORDER BY assignee ASC',
+        f'sprint = {sprint_num} ORDER BY assignee ASC',
+        f'text ~ "Sprint {sprint_num}" ORDER BY assignee ASC'
     ]
     
     all_issues = []
     
-    for jql in jql_options:
+    for jql in jql_queries:
         start_at = 0
         max_results = 100
-        all_issues = []
+        current_query_issues = []
         
         while True:
             payload = {
                 "jql": jql,
                 "startAt": start_at,
                 "maxResults": max_results,
-                "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
+                "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020"] # 包含 Sprint 欄位
             }
             
             response = requests.post(url, json=payload, headers=headers, auth=auth)
@@ -97,18 +99,26 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
             if response.status_code == 200:
                 data = response.json()
                 issues = data.get('issues', [])
-                all_issues.extend(issues)
+                current_query_issues.extend(issues)
                 
-                total = data.get('total', len(all_issues))
+                total = data.get('total', len(current_query_issues))
                 start_at += len(issues)
                 
                 if start_at >= total or not issues:
                     break
             else:
                 break
-        
-        if all_issues:
-            break
+                
+        if current_query_issues:
+            # 檢驗撈出的工單中是否包含該 Sprint 數字
+            target_str = str(sprint_num)
+            for issue in current_query_issues:
+                issue_str = str(issue)
+                if target_str in issue_str:
+                    all_issues.append(issue)
+                    
+            if all_issues:
+                break
 
     return all_issues
 
@@ -119,8 +129,6 @@ def filter_and_group_by_dept(issues, department):
     """
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
-    
-    # 允許顯示的狀態關鍵字與 Category
     allowed_statuses = ["TO DO", "IN PROGRESS", "IN DEVELOPMENT", "PENDING", "TESTING", "REOPENED"]
     
     for issue in issues:
@@ -133,12 +141,12 @@ def filter_and_group_by_dept(issues, department):
             
         display_name = assignee_obj.get('displayName', 'Unassigned')
         status_name = status_obj.get('name', '').upper()
-        status_category_key = status_obj.get('statusCategory', {}).get('key', '')  # 'new', 'indeterminate', 'done'
+        status_category_key = status_obj.get('statusCategory', {}).get('key', '')
         
         # 1. 檢查成員是否屬於目標部門
         is_in_dept = any(member.lower() in display_name.lower() for member in valid_members)
         
-        # 2. 檢查狀態是否為 To Do 或 In Progress（排除已完成 'done' 的工單）
+        # 2. 檢查狀態是否為 To Do 或 In Progress（排除 done）
         is_valid_status = (
             status_category_key in ["new", "indeterminate"] or 
             any(st_key in status_name for st_key in allowed_statuses)
@@ -371,7 +379,7 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正透過新版 JQL API 撈取 Sprint {sprint_num} 的 [{department}] 成員 (To Do / In Progress) 工單..."):
+        with st.spinner(f"正搜尋 Jira 中 Sprint {sprint_num} 的 [{department}] 成員 (To Do / In Progress) 工單..."):
             all_issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
             
             if all_issues:
@@ -385,7 +393,7 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
                 else:
                     st.session_state.jira_issues = None
                     st.session_state.grouped_issues = None
-                    st.warning(f"在 Sprint {sprint_num} 中，找不到 [{department}] 成員目前處於 To Do 或 In Progress 狀態的工單。")
+                    st.warning(f"在 Sprint {sprint_num} 中找到工單，但沒有 [{department}] 成員目前處於 To Do 或 In Progress 狀態的項目。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
