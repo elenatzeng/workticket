@@ -64,7 +64,7 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
         return {}
 
 def fetch_all_active_jira_issues(domain, email, token):
-    """僅抓取 To Do 與 In Progress 狀態的工單"""
+    """由 Jira JQL 撈取未完成/進行中工單 (排除 Done 狀態)"""
     auth = HTTPBasicAuth(email, token)
     jql = 'statusCategory in ("To Do", "In Progress") ORDER BY assignee ASC'
 
@@ -102,7 +102,7 @@ def fetch_all_active_jira_issues(domain, email, token):
     return all_issues
 
 def filter_and_group_by_dept(issues, department, sprint_num):
-    """過濾成員與 Sprint，並雙重確認狀態為 To Do 或 In Progress"""
+    """根據部門成員與 Sprint 關鍵字比對工單"""
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
     
@@ -122,13 +122,12 @@ def filter_and_group_by_dept(issues, department, sprint_num):
         assignee_obj = fields.get('assignee')
         status_obj = fields.get('status', {})
         
-        status_category = status_obj.get('statusCategory', {}).get('name', '')
-        status_name = status_obj.get('name', '')
+        # 排除已完成狀態（Done / Closed / Resolved）
+        status_category_key = status_obj.get('statusCategory', {}).get('key', '')
+        if status_category_key == 'done':
+            continue
         
-        allowed_statuses = ["To Do", "In Progress", "TO DO", "IN PROGRESS", "To-Do"]
-        is_valid_status = (status_category in ["To Do", "In Progress"]) or (status_name in allowed_statuses)
-        
-        if not assignee_obj or not is_valid_status:
+        if not assignee_obj:
             continue
             
         display_name = assignee_obj.get('displayName', '')
@@ -171,7 +170,7 @@ def format_estimate(timetracking):
     return "待評估"
 
 def build_single_issue_li_html(issue, domain):
-    """直接生成 <a> 超連結，讓 Confluence 編輯器自行轉為原生 Smart Link 格式"""
+    """直接生成 <a> 超連結，讓 Confluence 編輯器自行渲染成原生 Smart Link"""
     key = issue.get('key')
     fields = issue.get('fields', {})
     timetracking = fields.get('timetracking', {})
@@ -181,7 +180,7 @@ def build_single_issue_li_html(issue, domain):
     return f'<li><a href="{jira_url}">{key}</a> {estimate_str}</li>'
 
 def generate_user_text_for_copy(issues, domain):
-    """僅生成工單連結與估時的純文字（供一鍵複製貼上）"""
+    """僅生成工單連結與估時的純文字（供複製）"""
     lines = []
     for issue in issues:
         key = issue.get('key')
@@ -387,7 +386,7 @@ with col1:
 with col2:
     title = st.selectbox("職稱", ["QA Engineer", "Backend Engineer", "Frontend Engineer", "Product Manager"])
 with col3:
-    sprint_num = st.number_input("Sprint 號碼", min_value=1, max_value=200, value=52)
+    sprint_num = st.number_input("Sprint 號碼", min_value=1, max_value=200, value=53)
 
 target_page_title = st.text_input("要補充工單的 Confluence 頁面標題", value=f"Sprint {sprint_num} {department}週會")
 
@@ -397,7 +396,7 @@ if st.button("🔍 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正檢索 Jira 中包含 Sprint {sprint_num} 的 [{department}] 工單 (僅限 To Do / In Progress)..."):
+        with st.spinner(f"正檢索 Jira 中包含 Sprint {sprint_num} 的 [{department}] 工單..."):
             all_issues = fetch_all_active_jira_issues(atlassian_url, api_email, api_token)
             if all_issues:
                 grouped_dept_issues, debug_found_assignees = filter_and_group_by_dept(all_issues, department, sprint_num)
@@ -406,7 +405,7 @@ if st.button("🔍 從 Jira 抓取工單資料", type="primary"):
                     st.session_state.grouped_issues = grouped_dept_issues
                     st.success(f"🎉 成功抓取！已準備好 {len(grouped_dept_issues)} 位同仁的未完成工單。")
                 else:
-                    st.warning(f"已抓取到工單，但未比對到 Sprint {sprint_num} 的 To Do / In Progress 資料。")
+                    st.warning(f"已抓取到工單，但未比對到 Sprint {sprint_num} 的資料。")
             else:
                 st.warning("無法取得工單。")
 
@@ -488,5 +487,5 @@ if st.session_state.grouped_issues:
                             else:
                                 st.error(msg)
                 
-                # 2. 僅複製工單 URL 與估時的按鈕
+                # 2. 僅複製工單 URL 與估時
                 render_copy_button(f"📋 複製 {assignee} 工單連結", copy_text, f"copy_{idx}")
