@@ -4,24 +4,24 @@
 
 TEAM_MEMBERS = {
     "QA": [
-        "Elena",   # ela@intellianalyze.com
-        "Katty",   # kh@intellianalyze.com
-        "Emma",    # ema@intellianalyze.com
-        "Esther",  # Est@intellianalyze.com
-        "Baron",   # ba@intellianalyze.com
-        "Cooper"   # CP@intellianalyze.com
+        {"name": "Elena", "email": "ela@intellianalyze.com"},
+        {"name": "Katty", "email": "kh@intellianalyze.com"},
+        {"name": "Emma", "email": "ema@intellianalyze.com"},
+        {"name": "Esther", "email": "Est@intellianalyze.com"},
+        {"name": "Baron", "email": "ba@intellianalyze.com"},
+        {"name": "Cooper", "email": "CP@intellianalyze.com"}
     ],
     "BE RD": [
-        "Bill",    # bi@intellianalyze.com
-        "vic",     # vc@intellianalyze.com
-        "Vince"    # ve@intellianalyze.com
+        {"name": "Bill", "email": "bi@intellianalyze.com"},
+        {"name": "vic", "email": "vc@intellianalyze.com"},
+        {"name": "Vince", "email": "ve@intellianalyze.com"}
     ],
     "FE RD": [
-        "Tai",     # Ti@intellianalyze.com
-        "Kayden"   # kd@intellianalyze.com
+        {"name": "Tai", "email": "Ti@intellianalyze.com"},
+        {"name": "Kayden", "email": "kd@intellianalyze.com"}
     ],
     "PM": [
-        "Leo",     # Lo@intellianalyze.com
-        "kira"     # Kir@intellianalyze.com
+        {"name": "Leo", "email": "Lo@intellianalyze.com"},
+        {"name": "kira", "email": "Kir@intellianalyze.com"}
     ]
 }
