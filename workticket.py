@@ -60,9 +60,9 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     except Exception:
         return {}
 
-def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
+def fetch_all_active_jira_issues(domain, email, token):
     """
-    使用彈性 JQL 語法抓取當前進行中或包含指定 Sprint 數字的工單
+    抓取目前所有未完成 (To Do / In Progress) 的工單
     """
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
@@ -71,98 +71,90 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
         "Content-Type": "application/json"
     }
     
-    # 使用多種保險的 JQL 搜尋策略
-    jql_queries = [
-        f'sprint in openSprints() ORDER BY assignee ASC',
-        f'sprint = {sprint_num} ORDER BY assignee ASC',
-        f'sprint in ("AP Sprint {sprint_num}", "Sprint {sprint_num}") ORDER BY assignee ASC',
-        f'text ~ "{sprint_num}" ORDER BY assignee ASC'
-    ]
+    jql = 'statusCategory in ("To Do", "In Progress") ORDER BY assignee ASC'
     
     all_issues = []
+    start_at = 0
+    max_results = 100
     
-    for jql in jql_queries:
-        start_at = 0
-        max_results = 100
-        current_query_issues = []
+    while True:
+        payload = {
+            "jql": jql,
+            "startAt": start_at,
+            "maxResults": max_results,
+            "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020", "sprint"]
+        }
         
-        while True:
-            payload = {
-                "jql": jql,
-                "startAt": start_at,
-                "maxResults": max_results,
-                "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020"]
-            }
+        response = requests.post(url, json=payload, headers=headers, auth=auth)
+        
+        if response.status_code == 200:
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
             
-            response = requests.post(url, json=payload, headers=headers, auth=auth)
+            total = data.get('total', len(all_issues))
+            start_at += len(issues)
             
-            if response.status_code == 200:
-                data = response.json()
-                issues = data.get('issues', [])
-                current_query_issues.extend(issues)
-                
-                total = data.get('total', len(current_query_issues))
-                start_at += len(issues)
-                
-                if start_at >= total or not issues:
-                    break
-            else:
+            if start_at >= total or not issues:
                 break
-                
-        if current_query_issues:
-            all_issues = current_query_issues
+        else:
+            st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
             break
 
     return all_issues
 
-def filter_and_group_by_dept(issues, department):
+def filter_and_group_by_dept(issues, department, sprint_num):
     """
-    1. 精確比對：使用 Email / Display Name 比對 team_config.py 中的成員
-    2. 狀態篩選：僅保留 'To Do' 或 'In Progress' 狀態
+    1. 精確比對：根據 Jira 顯示名稱 (displayName) 或 Email 比對 Elena 等成員
+    2. 檢查 Sprint：工單的完整 JSON 內容或 Sprint 欄位中包含 Sprint 號碼 (例如 53)
     """
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
-    allowed_statuses = ["TO DO", "IN PROGRESS", "IN DEVELOPMENT", "PENDING", "TESTING", "REOPENED"]
     
+    # 提取設定檔中的所有關鍵字（包含 name 和 email）
+    member_keywords = []
+    for m in valid_members:
+        if isinstance(m, dict):
+            if m.get('name'): member_keywords.append(m['name'].lower())
+            if m.get('email'): member_keywords.append(m['email'].lower())
+        elif isinstance(m, str):
+            member_keywords.append(m.lower())
+
+    sprint_str = str(sprint_num)
+    debug_found_assignees = set()
+
     for issue in issues:
         fields = issue.get('fields', {})
         assignee_obj = fields.get('assignee')
-        status_obj = fields.get('status', {})
         
         if not assignee_obj:
             continue
             
         display_name = assignee_obj.get('displayName', '')
         email_address = assignee_obj.get('emailAddress', '').lower()
-        status_name = status_obj.get('name', '').upper()
-        status_category_key = status_obj.get('statusCategory', {}).get('key', '')
         
-        # 1. 精確檢查成員（比對 Email 或 Name）
+        if display_name:
+            debug_found_assignees.add(display_name)
+            
+        # 1. 人員比對：只要 displayName 或 email 包含 key (如 "elena")
         is_in_dept = False
-        member_label = display_name or email_address
+        matched_display_name = display_name or email_address
         
-        for m in valid_members:
-            m_name = m.get('name', '').lower()
-            m_email = m.get('email', '').lower()
-            
-            if (m_email and m_email in email_address) or (m_name and m_name in display_name.lower()):
+        for key in member_keywords:
+            if (display_name and key in display_name.lower()) or (email_address and key in email_address):
                 is_in_dept = True
-                # 以 Name 做為預設 UI 顯示名稱
-                member_label = f"{m.get('name')} ({display_name})" if display_name else m.get('name')
                 break
+                
+        # 2. Sprint 比對：針對跨 Sprint (例如 AP Sprint 53 +4)，只要 JSON 代表字串中有數字 "53" 即可
+        issue_raw_str = str(issue)
+        has_sprint_match = (sprint_str in issue_raw_str)
         
-        # 2. 檢查狀態是否為 To Do 或 In Progress（排除 已完成 done）
-        is_valid_status = (
-            status_category_key in ["new", "indeterminate"] or 
-            any(st_key in status_name for st_key in allowed_statuses)
-        ) and status_category_key != "done"
-        
-        if is_in_dept and is_valid_status:
-            if member_label not in grouped:
-                grouped[member_label] = []
-            grouped[member_label].append(issue)
+        if is_in_dept and has_sprint_match:
+            if matched_display_name not in grouped:
+                grouped[matched_display_name] = []
+            grouped[matched_display_name].append(issue)
             
-    return grouped
+    return grouped, debug_found_assignees
 
 def get_status_color(status_name):
     """依據 Jira 狀態名稱轉換為 Confluence Status Macro 色系"""
@@ -384,25 +376,26 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正透過 Email 精確匹配 [{department}] 成員之未完成工單..."):
-            all_issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
+        with st.spinner(f"正檢索 Jira 中包含 Sprint {sprint_num} 的 [{department}] 工單..."):
+            all_issues = fetch_all_active_jira_issues(atlassian_url, api_email, api_token)
             
             if all_issues:
-                # 使用 Email 與 Name 雙重檢查匹配
-                grouped_dept_issues = filter_and_group_by_dept(all_issues, department)
+                grouped_dept_issues, debug_found_assignees = filter_and_group_by_dept(all_issues, department, sprint_num)
                 
                 if grouped_dept_issues:
                     st.session_state.jira_issues = all_issues
                     st.session_state.grouped_issues = grouped_dept_issues
-                    st.success(f"🎉 成功撈取！已比對出 {len(grouped_dept_issues)} 位 [{department}] 成員之進行中/待辦工單。")
+                    st.success(f"🎉 成功撈取！已成功找到 Elena 等 {len(grouped_dept_issues)} 位成員的工單！")
                 else:
                     st.session_state.jira_issues = None
                     st.session_state.grouped_issues = None
-                    st.warning(f"已成功連線至 Jira 取得工單，但在當前 Sprint 中找不到屬於 [{department}] 成員 (To Do / In Progress) 的項目。")
+                    st.warning(f"💡 成功連線 Jira 並撈取到 {len(all_issues)} 筆進行中工單。但在匹配 Sprint {sprint_num} 及 [{department}] 成員時未命中。")
+                    with st.expander("🔍 檢視 Jira 當前撈到的所有受託人 (Assignees) 清單"):
+                        st.write(list(debug_found_assignees))
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
-                st.warning("無法從 Jira 取得工單，請確認 API Token 是否有存取專案 Jira 的權限。")
+                st.warning("無法從 Jira 取得任何工單，請確認帳號權限。")
 
 # 呈現選擇成員與排版預覽
 if st.session_state.grouped_issues:
