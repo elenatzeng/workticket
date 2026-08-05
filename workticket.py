@@ -57,8 +57,8 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     except Exception:
         return {}
 
-def fetch_jira_issues(domain, email, token, sprint_num):
-    """使用最新 Jira POST /rest/api/3/search/jql API 撈取 Issue"""
+def fetch_jira_issues(domain, email, token, sprint_num, department):
+    """使用最新 Jira POST /rest/api/3/search/jql API 撈取 Issue (並根據部門過濾)"""
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
     headers = {
@@ -66,15 +66,23 @@ def fetch_jira_issues(domain, email, token, sprint_num):
         "Content-Type": "application/json"
     }
     
-    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+    # 加入 Component / Label 部門過濾邏輯
+    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") AND (component = "{department}" OR labels = "{department}") ORDER BY assignee ASC'
     
     payload = {
         "jql": jql,
         "maxResults": 100,
-        "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
+        "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "components", "labels"]
     }
     
     response = requests.post(url, json=payload, headers=headers, auth=auth)
+    
+    # 若依據 Component/Label 過濾無結果或報錯，降級為純 Sprint 搜尋
+    if response.status_code != 200 or not response.json().get('issues', []):
+        fallback_jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+        payload["jql"] = fallback_jql
+        response = requests.post(url, json=payload, headers=headers, auth=auth)
+
     if response.status_code == 200:
         return response.json().get('issues', [])
     else:
@@ -107,7 +115,7 @@ def get_status_color(status_name):
         return "Grey"
 
 def format_estimate(timetracking):
-    """將秒數估時轉換為工天數 (例如 8 天 4 小時/以 8 小時制為 1D 換算)"""
+    """估時換算"""
     if not timetracking:
         return "待評估"
     
@@ -175,7 +183,6 @@ def build_confluence_html(grouped_issues, department, current_sprint_num, select
             timetracking = fields.get('timetracking', {})
             estimate_str = format_estimate(timetracking)
             
-            # Confluence Jira 巨集與 Status 標籤巨集
             jira_macro = f'<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">{key}</ac:parameter></ac:structured-macro>'
             status_macro = f'<ac:structured-macro ac:name="status" ac:schema-version="1"><ac:parameter ac:name="title">{html.escape(status_name)}</ac:parameter><ac:parameter ac:name="colour">{status_color}</ac:parameter></ac:structured-macro>'
             
@@ -183,7 +190,6 @@ def build_confluence_html(grouped_issues, department, current_sprint_num, select
             
         issues_html += "</ul>"
         
-        # 下一個 Sprint
         next_sprint_num = current_sprint_num + 1
         issues_html += f"""
         <p><u><strong>AP Sprint {next_sprint_num} :</strong></u></p>
@@ -316,8 +322,8 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正從 Jira 撈取 AP Sprint {sprint_num} 工單..."):
-            issues = fetch_jira_issues(atlassian_url, api_email, api_token, sprint_num)
+        with st.spinner(f"正從 Jira 撈取 {department} 部門 AP Sprint {sprint_num} 工單..."):
+            issues = fetch_jira_issues(atlassian_url, api_email, api_token, sprint_num, department)
             if issues:
                 st.session_state.jira_issues = issues
                 st.session_state.grouped_issues = group_issues_by_assignee(issues)
@@ -325,7 +331,7 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
-                st.warning(f"在 Jira 中找不到 Sprint 號碼為 '{sprint_num}' 的工單。")
+                st.warning(f"在 Jira 中找不到部門 '{department}' 且 Sprint 號碼為 '{sprint_num}' 的工單。")
 
 # 呈現選擇成員與排版預覽
 if st.session_state.grouped_issues:
