@@ -15,15 +15,24 @@ default_email = st.secrets.get("ATLASSIAN_EMAIL", "your-email@example.com")
 # 輔助 API 函式：連線與選單撈取
 # -----------------------------------------------------------------------------
 def fetch_confluence_spaces(domain, email, token):
-    """取得 Confluence 所有 Space 清單"""
+    """取得 Confluence 所有團隊/組織 Space 清單（排除個人空間）"""
     url = f"{domain.rstrip('/')}/wiki/rest/api/space"
     auth = HTTPBasicAuth(email, token)
+    params = {
+        "limit": 100,
+        "type": "global",
+        "status": "current"
+    }
     try:
-        res = requests.get(url, auth=auth, params={"limit": 50})
+        res = requests.get(url, auth=auth, params=params)
         if res.status_code == 200:
             results = res.json().get('results', [])
-            # 回傳字典 { "Space Name (Key)": "Key" }
-            return {f"{s['name']} ({s['key']})": s['key'] for s in results}
+            spaces_dict = {}
+            for s in results:
+                # 過濾：排除 type 為 personal 或 Key 為 ~ 開頭的個人空間
+                if s.get('type') != 'personal' and not s.get('key', '').startswith('~'):
+                    spaces_dict[f"{s['name']} ({s['key']})"] = s['key']
+            return spaces_dict
         return {}
     except Exception:
         return {}
@@ -42,7 +51,6 @@ def fetch_confluence_pages(domain, email, token, space_key):
         res = requests.get(url, auth=auth, params=params)
         if res.status_code == 200:
             results = res.json().get('results', [])
-            # 回傳字典 { "頁面標題": "Page ID" }
             return {p['title']: p['id'] for p in results}
         return {}
     except Exception:
@@ -178,7 +186,7 @@ def create_confluence_page(domain, email, token, space_key, title, html_content,
     return response
 
 # -----------------------------------------------------------------------------
-# 側邊欄：Atlassian 連線與動態選單
+# 側邊欄：Atlassian 連線與動態選單（支援搜尋過濾）
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 1. Atlassian 連線設定")
@@ -192,27 +200,51 @@ with st.sidebar:
     selected_space_key = None
     selected_parent_id = None
     
-    # 只有當 Token 有填寫時才發起連線撈取選單
     if api_token:
         with st.spinner("連線中，撈取 Space 清單..."):
             spaces_dict = fetch_confluence_spaces(atlassian_url, api_email, api_token)
             
         if spaces_dict:
-            selected_space_name = st.selectbox("選擇 Confluence Space", list(spaces_dict.keys()))
-            selected_space_key = spaces_dict[selected_space_name]
+            # 1. Space 搜尋過濾
+            space_search = st.text_input("🔍 搜尋 Space 名稱或 Key", value="", help="輸入關鍵字即可過濾下方 Space 選單")
             
-            # 撈取該 Space 下的頁面清單
-            with st.spinner("撈取父頁面清單..."):
-                pages_dict = fetch_confluence_pages(atlassian_url, api_email, api_token, selected_space_key)
-                
-            if pages_dict:
-                page_options = ["(不指定，直接存放在 Space 根目錄)"] + list(pages_dict.keys())
-                selected_page_name = st.selectbox("選擇父頁面 (Parent Page)", page_options)
-                
-                if selected_page_name != "(不指定，直接存放在 Space 根目錄)":
-                    selected_parent_id = pages_dict[selected_page_name]
+            if space_search.strip():
+                filtered_spaces = {
+                    name: key for name, key in spaces_dict.items()
+                    if space_search.lower() in name.lower()
+                }
             else:
-                st.caption("⚠️ 該 Space 下找不到可選的頁面或無權限。")
+                filtered_spaces = spaces_dict
+                
+            if filtered_spaces:
+                selected_space_name = st.selectbox("選擇 Confluence Space", list(filtered_spaces.keys()))
+                selected_space_key = filtered_spaces[selected_space_name]
+                
+                # 2. 撈取父頁面清單
+                with st.spinner("撈取父頁面清單..."):
+                    pages_dict = fetch_confluence_pages(atlassian_url, api_email, api_token, selected_space_key)
+                    
+                if pages_dict:
+                    # Parent Page 搜尋過濾
+                    page_search = st.text_input("🔍 搜尋父頁面標題", value="", help="輸入關鍵字過濾父頁面")
+                    
+                    if page_search.strip():
+                        filtered_pages = {
+                            title: pid for title, pid in pages_dict.items()
+                            if page_search.lower() in title.lower()
+                        }
+                    else:
+                        filtered_pages = pages_dict
+                        
+                    page_options = ["(不指定，直接存放在 Space 根目錄)"] + list(filtered_pages.keys())
+                    selected_page_name = st.selectbox("選擇父頁面 (Parent Page)", page_options)
+                    
+                    if selected_page_name != "(不指定，直接存放在 Space 根目錄)":
+                        selected_parent_id = filtered_pages[selected_page_name]
+                else:
+                    st.caption("⚠️ 該 Space 下找不到可選的頁面或無權限。")
+            else:
+                st.warning("⚠️ 找不到符合條件的 Space。")
         else:
             st.error("❌ 連線失敗，請檢查 Domain, Email 或 API Token 是否正確。")
     else:
