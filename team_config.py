@@ -11,12 +11,12 @@ TEAM_MEMBERS = {
         {"name": "Baron", "email": "ba@intellianalyze.com"},
         {"name": "Cooper", "email": "CP@intellianalyze.com"}
     ],
-    "BE RD": [
+    "Back-End": [
         {"name": "Bill", "email": "bi@intellianalyze.com"},
         {"name": "vic", "email": "vc@intellianalyze.com"},
         {"name": "Vince", "email": "ve@intellianalyze.com"}
     ],
-    "FE RD": [
+    "Front-End": [
         {"name": "Tai", "email": "Ti@intellianalyze.com"},
         {"name": "Kayden", "email": "kd@intellianalyze.com"}
     ],
@@ -24,4 +24,9 @@ TEAM_MEMBERS = {
         {"name": "Leo", "email": "Lo@intellianalyze.com"},
         {"name": "kira", "email": "Kir@intellianalyze.com"}
     ]
+    "App": [
+        {"name": "Hank", "email": "hk@intellianalyze.com"},
+        {"name": "kira", "email": "ec@intellianalyze.com"}
+    ]
+    
 }
