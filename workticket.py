@@ -62,17 +62,17 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
 
 def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
     """
-    分頁撈取 Sprint 內的所有工單 (支援模糊比對 Sprint 名稱)
+    分頁撈取 Sprint 內的所有工單 (修正 Endpoint 與合法 JQL)
     """
-    url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
+    url = f"{domain.rstrip('/')}/rest/api/3/search"
     auth = HTTPBasicAuth(email, token)
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
     
-    # 放寬 JQL 搜尋：優先匹配包含數字的 Sprint (如 AP Sprint 53)
-    jql = f'sprint ~ "{sprint_num}" ORDER BY assignee ASC'
+    # 組合多種常見 Sprint 語法 (同時支援 ID 與名稱)
+    jql = f'sprint = {sprint_num} OR sprint = "AP Sprint {sprint_num}" OR sprint = "Sprint {sprint_num}" ORDER BY assignee ASC'
     
     all_issues = []
     start_at = 0
@@ -88,11 +88,6 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
         
         response = requests.post(url, json=payload, headers=headers, auth=auth)
         
-        # 若以文字搜尋失敗，退回精確比對
-        if response.status_code != 200 and start_at == 0:
-            payload["jql"] = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
-            response = requests.post(url, json=payload, headers=headers, auth=auth)
-            
         if response.status_code == 200:
             data = response.json()
             issues = data.get('issues', [])
@@ -111,7 +106,7 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
 
 def filter_and_group_by_dept(issues, department):
     """
-    嚴格過濾：僅保留 team_config.py 中指定部門名單內的成員工單
+    僅保留 team_config.py 中指定部門名單內的成員工單
     """
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
@@ -125,7 +120,7 @@ def filter_and_group_by_dept(issues, department):
             
         display_name = assignee_obj.get('displayName', 'Unassigned')
         
-        # 嚴格比對：只留下 displayName 包含 team_config.py 該部門成員名字的人
+        # 比對 displayName 是否包含 team_config.py 該部門成員名字
         is_in_dept = any(member.lower() in display_name.lower() for member in valid_members)
         
         if is_in_dept:
