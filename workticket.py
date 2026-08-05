@@ -12,7 +12,7 @@ default_domain = st.secrets.get("ATLASSIAN_DOMAIN", "https://your-domain.atlassi
 default_email = st.secrets.get("ATLASSIAN_EMAIL", "your-email@example.com")
 
 # -----------------------------------------------------------------------------
-# 輔助 API 函式：連線與選單撈取
+# 輔助 API 函式：連線與階層選單撈取
 # -----------------------------------------------------------------------------
 def fetch_confluence_spaces(domain, email, token):
     """取得 Confluence 所有團隊/組織 Space 清單（排除個人空間）"""
@@ -29,7 +29,6 @@ def fetch_confluence_spaces(domain, email, token):
             results = res.json().get('results', [])
             spaces_dict = {}
             for s in results:
-                # 過濾：排除 type 為 personal 或 Key 為 ~ 開頭的個人空間
                 if s.get('type') != 'personal' and not s.get('key', '').startswith('~'):
                     spaces_dict[f"{s['name']} ({s['key']})"] = s['key']
             return spaces_dict
@@ -37,37 +36,29 @@ def fetch_confluence_spaces(domain, email, token):
     except Exception:
         return {}
 
-def fetch_confluence_pages_with_path(domain, email, token, space_key):
-    """取得指定 Space 下的頁面，並生成完整層級路徑 (例: QA weekly meeting > 2026年工作周報)"""
-    url = f"{domain.rstrip('/')}/wiki/rest/api/content"
+def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
+    """
+    撈取指定父頁面下的子頁面。
+    若未指定 parent_id，則撈取 Space 頂層的根頁面。
+    """
     auth = HTTPBasicAuth(email, token)
-    params = {
-        "spaceKey": space_key,
-        "type": "page",
-        "limit": 100,
-        "expand": "ancestors"  # 展開上層父頁面資訊
-    }
+    if parent_id:
+        url = f"{domain.rstrip('/')}/wiki/rest/api/content/{parent_id}/child/page"
+        params = {"limit": 100}
+    else:
+        url = f"{domain.rstrip('/')}/wiki/rest/api/content"
+        params = {
+            "spaceKey": space_key,
+            "type": "page",
+            "limit": 100,
+            "depth": "root"  # 僅撈取頂層頁面
+        }
+    
     try:
         res = requests.get(url, auth=auth, params=params)
         if res.status_code == 200:
             results = res.json().get('results', [])
-            pages_dict = {}
-            for p in results:
-                page_id = p['id']
-                page_title = p['title']
-                ancestors = p.get('ancestors', [])
-                
-                # 組合父頁面標題路徑
-                if ancestors:
-                    path_titles = [anc['title'] for anc in ancestors] + [page_title]
-                    full_path = " > ".join(path_titles)
-                else:
-                    full_path = page_title
-                
-                pages_dict[full_path] = page_id
-            
-            # 依據路徑名稱排序，呈現樹狀排列感
-            return dict(sorted(pages_dict.items()))
+            return {p['title']: p['id'] for p in results}
         return {}
     except Exception:
         return {}
@@ -202,7 +193,7 @@ def create_confluence_page(domain, email, token, space_key, title, html_content,
     return response
 
 # -----------------------------------------------------------------------------
-# 側邊欄：Atlassian 連線與動態選單（支援路徑顯示）
+# 側邊欄：Atlassian 連線與逐層選單
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 1. Atlassian 連線設定")
@@ -221,50 +212,43 @@ with st.sidebar:
             spaces_dict = fetch_confluence_spaces(atlassian_url, api_email, api_token)
             
         if spaces_dict:
-            # 1. Space 搜尋過濾
-            space_search = st.text_input("🔍 搜尋 Space 名稱或 Key", value="", help="輸入關鍵字即可過濾下方 Space 選單")
+            selected_space_name = st.selectbox("1. 選擇 Confluence Space", list(spaces_dict.keys()))
+            selected_space_key = spaces_dict[selected_space_name]
             
-            if space_search.strip():
-                filtered_spaces = {
-                    name: key for name, key in spaces_dict.items()
-                    if space_search.lower() in name.lower()
-                }
-            else:
-                filtered_spaces = spaces_dict
+            # --- 第一層：頂層頁面 ---
+            with st.spinner("撈取根頁面目錄..."):
+                root_pages = fetch_child_pages(atlassian_url, api_email, api_token, space_key=selected_space_key)
                 
-            if filtered_spaces:
-                selected_space_name = st.selectbox("選擇 Confluence Space", list(filtered_spaces.keys()))
-                selected_space_key = filtered_spaces[selected_space_name]
+            if root_pages:
+                level1_options = ["(無，存放在 Space 根目錄)"] + list(root_pages.keys())
+                selected_l1 = st.selectbox("2. 選擇頂層父頁面 (L1)", level1_options)
                 
-                # 2. 撈取含有路徑層級的父頁面清單
-                with st.spinner("撈取頁面層級目錄..."):
-                    pages_dict = fetch_confluence_pages_with_path(atlassian_url, api_email, api_token, selected_space_key)
+                if selected_l1 != "(無，存放在 Space 根目錄)":
+                    selected_parent_id = root_pages[selected_l1]
                     
-                if pages_dict:
-                    # Parent Page 搜尋過濾
-                    page_search = st.text_input("🔍 搜尋頁面路徑與標題", value="", help="輸入關鍵字過濾父頁面")
-                    
-                    if page_search.strip():
-                        filtered_pages = {
-                            path: pid for path, pid in pages_dict.items()
-                            if page_search.lower() in path.lower()
-                        }
-                    else:
-                        filtered_pages = pages_dict
+                    # --- 第二層：子頁面 ---
+                    l2_pages = fetch_child_pages(atlassian_url, api_email, api_token, parent_id=selected_parent_id)
+                    if l2_pages:
+                        level2_options = ["(停在此層，做為父頁面)"] + list(l2_pages.keys())
+                        selected_l2 = st.selectbox("3. 選擇次層子頁面 (L2)", level2_options)
                         
-                    page_options = ["(不指定，直接存放在 Space 根目錄)"] + list(filtered_pages.keys())
-                    selected_page_name = st.selectbox("選擇父頁面 (完整層級路徑)", page_options)
-                    
-                    if selected_page_name != "(不指定，直接存放在 Space 根目錄)":
-                        selected_parent_id = filtered_pages[selected_page_name]
-                else:
-                    st.caption("⚠️ 該 Space 下找不到可選的頁面或無權限。")
+                        if selected_l2 != "(停在此層，做為父頁面)":
+                            selected_parent_id = l2_pages[selected_l2]
+                            
+                            # --- 第三層：孫頁面 ---
+                            l3_pages = fetch_child_pages(atlassian_url, api_email, api_token, parent_id=selected_parent_id)
+                            if l3_pages:
+                                level3_options = ["(停在此層，做為父頁面)"] + list(l3_pages.keys())
+                                selected_l3 = st.selectbox("4. 選擇第三層子頁面 (L3)", level3_options)
+                                
+                                if selected_l3 != "(停在此層，做為父頁面)":
+                                    selected_parent_id = l3_pages[selected_l3]
             else:
-                st.warning("⚠️ 找不到符合條件的 Space。")
+                st.caption("⚠️ 該 Space 下尚無任何頁面。")
         else:
             st.error("❌ 連線失敗，請檢查 Domain, Email 或 API Token 是否正確。")
     else:
-        st.info("👈 請先輸入 API Token 以載入 Space 與父頁面選單")
+        st.info("👈 請先輸入 API Token 以載入 Space 與頁面目錄")
 
 # -----------------------------------------------------------------------------
 # 主要表單：部門、職稱與 Sprint 選擇
