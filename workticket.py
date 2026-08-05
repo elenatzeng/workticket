@@ -62,64 +62,43 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
 
 def fetch_all_active_jira_issues(domain, email, token):
     """
-    使用相容性最高的 GET/POST API 方式抓取未完成 (To Do / In Progress) 工單
+    使用新版 /rest/api/3/search/jql 端點抓取未完成 (To Do / In Progress) 工單
+    新版 API 已移除 startAt/total，改用 nextPageToken 進行分頁
     """
     auth = HTTPBasicAuth(email, token)
     jql = 'statusCategory in ("To Do", "In Progress") ORDER BY assignee ASC'
-    
+
+    url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
     all_issues = []
-    start_at = 0
-    max_results = 100
-    
-    # 優先嘗試 REST API v3 GET search (相容度最高)
-    url_get = f"{domain.rstrip('/')}/rest/api/3/search"
-    
+    next_page_token = None
+
     while True:
-        params = {
+        payload = {
             "jql": jql,
-            "startAt": start_at,
-            "maxResults": max_results,
-            "fields": "summary,status,assignee,timetracking,issuetype,customfield_10020"
+            "maxResults": 100,
+            "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020"]
         }
-        
-        response = requests.get(url_get, params=params, auth=auth)
-        
-        # 若 GET 成功
-        if response.status_code == 200:
-            data = response.json()
-            issues = data.get('issues', [])
-            all_issues.extend(issues)
-            
-            total = data.get('total', len(all_issues))
-            start_at += len(issues)
-            
-            if start_at >= total or not issues:
-                break
-        else:
-            # 備援機制：嘗試 POST 方法（使用合規的 json payload）
-            url_post = f"{domain.rstrip('/')}/rest/api/3/search/jql"
-            headers = {"Accept": "application/json", "Content-Type": "application/json"}
-            payload = {
-                "jql": jql,
-                "startAt": start_at,
-                "maxResults": max_results,
-                "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020"]
-            }
-            res_post = requests.post(url_post, json=payload, headers=headers, auth=auth)
-            
-            if res_post.status_code == 200:
-                data = res_post.json()
-                issues = data.get('issues', [])
-                all_issues.extend(issues)
-                
-                total = data.get('total', len(all_issues))
-                start_at += len(issues)
-                
-                if start_at >= total or not issues:
-                    break
-            else:
-                st.error(f"Jira API 錯誤 ({res_post.status_code}): {res_post.text}")
-                break
+        if next_page_token:
+            payload["nextPageToken"] = next_page_token
+
+        response = requests.post(url, json=payload, headers=headers, auth=auth)
+
+        if response.status_code != 200:
+            st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
+            break
+
+        data = response.json()
+        issues = data.get('issues', [])
+        all_issues.extend(issues)
+
+        next_page_token = data.get('nextPageToken')
+        is_last = data.get('isLast', True)
+
+        # 沒有下一頁 token，或明確標示是最後一頁，就結束
+        if not next_page_token or is_last or not issues:
+            break
 
     return all_issues
 
