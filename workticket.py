@@ -2,11 +2,15 @@ import streamlit as st
 import requests
 from requests.auth import HTTPBasicAuth
 import html
+import re
+from bs4 import BeautifulSoup
+import streamlit.components.v1 as components
 
 # 匯入團隊組織設定檔
 from team_config import TEAM_MEMBERS
 
 st.set_page_config(page_title="WorkTicket - Jira to Confluence 工具", layout="wide", page_icon="📋")
+
 st.title("📋 WorkTicket: Jira to Confluence 週會頁面自動生成器")
 
 # 預設網域與設定
@@ -22,7 +26,6 @@ if "grouped_issues" not in st.session_state:
 # -----------------------------------------------------------------------------
 # 輔助 API 函式
 # -----------------------------------------------------------------------------
-
 def fetch_confluence_spaces(domain, email, token):
     """取得 Confluence 所有團隊 Space 清單"""
     url = f"{domain.rstrip('/')}/wiki/rest/api/space"
@@ -41,7 +44,6 @@ def fetch_confluence_spaces(domain, email, token):
     except Exception:
         return {}
 
-
 def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     """撈取指定頁面下的子頁面（或根頁面）"""
     auth = HTTPBasicAuth(email, token)
@@ -51,6 +53,7 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     else:
         url = f"{domain.rstrip('/')}/wiki/rest/api/content"
         params = {"spaceKey": space_key, "type": "page", "limit": 100, "depth": "root"}
+    
     try:
         res = requests.get(url, auth=auth, params=params)
         if res.status_code == 200:
@@ -60,15 +63,10 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     except Exception:
         return {}
 
-
-def fetch_all_active_jira_issues(domain, email, token, sprint_num):
-    """
-    使用新版 /rest/api/3/search/jql 端點，直接用 JQL 的 Sprint 欄位篩選，
-    避免像 ALL-5453 這種「issue key 剛好包含 53」被誤判進 Sprint 53 的情況。
-    分頁改用 nextPageToken（新版 API 不支援 startAt）。
-    """
+def fetch_all_active_jira_issues(domain, email, token):
+    """由 Jira JQL 撈取未完成/進行中工單 (排除 Done 狀態)"""
     auth = HTTPBasicAuth(email, token)
-    jql = f'statusCategory in ("To Do", "In Progress") AND Sprint = {sprint_num} ORDER BY assignee ASC'
+    jql = 'statusCategory in ("To Do", "In Progress") ORDER BY assignee ASC'
 
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -80,7 +78,7 @@ def fetch_all_active_jira_issues(domain, email, token, sprint_num):
         payload = {
             "jql": jql,
             "maxResults": 100,
-            "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
+            "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "customfield_10020"]
         }
         if next_page_token:
             payload["nextPageToken"] = next_page_token
@@ -103,14 +101,11 @@ def fetch_all_active_jira_issues(domain, email, token, sprint_num):
 
     return all_issues
 
-
-def filter_and_group_by_dept(issues, department):
-    """
-    Sprint 已經在 JQL 端篩選過，這裡只需要比對部門成員即可。
-    根據 Jira 顯示名稱 (displayName) 或 Email 比對成員。
-    """
+def filter_and_group_by_dept(issues, department, sprint_num):
+    """根據部門成員與 Sprint 關鍵字比對工單"""
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
+    
     member_keywords = []
     for m in valid_members:
         if isinstance(m, dict):
@@ -119,48 +114,47 @@ def filter_and_group_by_dept(issues, department):
         elif isinstance(m, str):
             member_keywords.append(m.lower())
 
+    sprint_str = str(sprint_num)
     debug_found_assignees = set()
 
     for issue in issues:
         fields = issue.get('fields', {})
         assignee_obj = fields.get('assignee')
+        status_obj = fields.get('status', {})
+        
+        status_category_key = status_obj.get('statusCategory', {}).get('key', '')
+        if status_category_key == 'done':
+            continue
+        
         if not assignee_obj:
             continue
-
+            
         display_name = assignee_obj.get('displayName', '')
         email_address = assignee_obj.get('emailAddress', '').lower()
-
+        
         if display_name:
             debug_found_assignees.add(display_name)
-
+            
         is_in_dept = False
         matched_display_name = display_name or email_address
+        
         for key in member_keywords:
             if (display_name and key in display_name.lower()) or (email_address and key in email_address):
                 is_in_dept = True
                 break
-
-        if is_in_dept:
-            grouped.setdefault(matched_display_name, []).append(issue)
-
+                
+        issue_raw_str = str(issue)
+        has_sprint_match = (sprint_str in issue_raw_str)
+        
+        if is_in_dept and has_sprint_match:
+            if matched_display_name not in grouped:
+                grouped[matched_display_name] = []
+            grouped[matched_display_name].append(issue)
+            
     return grouped, debug_found_assignees
 
-
-def get_status_color(status_name):
-    """依據 Jira 狀態名稱轉換為 Confluence Status Macro 色系"""
-    status_upper = status_name.upper()
-    if status_upper in ["DONE", "RESOLVED", "CLOSED"]:
-        return "Green"
-    elif status_upper in ["IN PROGRESS", "IN DEVELOPMENT"]:
-        return "Blue"
-    elif "PENDING" in status_upper or "TESTING" in status_upper:
-        return "Yellow"
-    else:
-        return "Grey"
-
-
 def format_estimate(timetracking):
-    """估時換算"""
+    """估時格式化"""
     if not timetracking:
         return "待評估"
     original_estimate = timetracking.get('originalEstimate')
@@ -174,159 +168,206 @@ def format_estimate(timetracking):
         return f"估時：{days}D"
     return "待評估"
 
+def build_single_issue_li_html(issue, domain):
+    """使用 Confluence 原生 Smart Link 格式 (data-card-appearance="inline")"""
+    key = issue.get('key')
+    fields = issue.get('fields', {})
+    timetracking = fields.get('timetracking', {})
+    estimate_str = format_estimate(timetracking)
+    
+    issue_url = f"{domain.rstrip('/')}/browse/{key}"
+    smart_link = f'<a href="{issue_url}" data-card-appearance="inline">{issue_url}</a>'
+    return f'<li>{smart_link} {estimate_str}</li>'
 
-def build_confluence_html(grouped_issues, department, current_sprint_num, selected_assignees):
-    """建構 Confluence Storage Format XML"""
-    header_html = f"""
-<p><strong>{department} 週報會議紀錄</strong></p>
-<ul>
-<li>工作彙報，可包括如下內容
-<ul>
-<li>Sprint 進展</li>
-<li>已制定項目情況</li>
-<li>臨時項目情況</li>
-</ul>
-</li>
-<li>下週計劃</li>
-<li>存在的困難和問題
-<ul>
-<li>跨部門問題</li>
-<li>跨地域問題</li>
-<li>方式方法問題（知識共享、文化、團隊等）</li>
-</ul>
-</li>
-</ul>
-<p><strong>會前務必更新會議紀要：</strong></p>
-<p><strong>會議議程：</strong></p>
-<ol>
-<li>同仁工作彙報
-<ul>
-<li>Sprint 進展（側重問題和困難）</li>
-<li>已制定項目情況</li>
-<li>臨時項目情況</li>
-<li>下週計劃</li>
-</ul>
-</li>
-</ol>
-<hr />
-"""
+def generate_user_text_for_copy(issues, domain):
+    """僅生成工單連結與估時的純文字（供複製）"""
+    lines = []
+    for issue in issues:
+        key = issue.get('key')
+        fields = issue.get('fields', {})
+        estimate_str = format_estimate(fields.get('timetracking', {}))
+        jira_url = f"{domain.rstrip('/')}/browse/{key}"
+        lines.append(f"{jira_url} {estimate_str}")
+    
+    return "\n".join(lines)
 
-    table_rows = ""
-    for assignee in selected_assignees:
-        issues = grouped_issues.get(assignee, [])
-        issues_html = f"<p><u><strong>AP Sprint {current_sprint_num} :</strong></u></p><ul>"
-        for issue in issues:
-            key = issue.get('key')
-            fields = issue.get('fields', {})
-            summary = fields.get('summary', '')
-            status_obj = fields.get('status', {})
-            status_name = status_obj.get('name', 'To Do')
-            status_color = get_status_color(status_name)
-            timetracking = fields.get('timetracking', {})
-            estimate_str = format_estimate(timetracking)
+def render_copy_button(button_label, text_to_copy, button_id):
+    """JavaScript 一鍵複製實體按鈕"""
+    escaped_text = text_to_copy.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$').replace('\n', '\\n')
+    html_code = f"""
+    <button id="btn_{button_id}" style="
+        background-color: #4CAF50;
+        color: white;
+        padding: 6px 14px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        margin-top: 4px;
+    ">{button_label}</button>
 
-            jira_macro = f'<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">{key}</ac:parameter></ac:structured-macro>'
-            status_macro = f'<ac:structured-macro ac:name="status" ac:schema-version="1"><ac:parameter ac:name="title">{html.escape(status_name)}</ac:parameter><ac:parameter ac:name="colour">{status_color}</ac:parameter></ac:structured-macro>'
+    <script>
+    document.getElementById("btn_{button_id}").onclick = function() {{
+        const text = "{escaped_text}";
+        navigator.clipboard.writeText(text).then(() => {{
+            const btn = document.getElementById("btn_{button_id}");
+            btn.innerText = "✓ 已複製！";
+            btn.style.backgroundColor = "#2E7D32";
+            setTimeout(() => {{
+                btn.innerText = "{button_label}";
+                btn.style.backgroundColor = "#4CAF50";
+            }}, 2000);
+        }}).catch(err => {{
+            console.error('複製失敗:', err);
+        }});
+    }};
+    </script>
+    """
+    components.html(html_code, height=45)
 
-            issues_html += f"<li>{jira_macro}: {html.escape(summary)} {status_macro} {estimate_str}</li>"
-        issues_html += "</ul>"
-
-        next_sprint_num = current_sprint_num + 1
-        issues_html += f"""
-<p><u><strong>AP Sprint {next_sprint_num} :</strong></u></p>
-<p><span style="color: rgb(255,102,0);">(這個Sprint未完成，會延至下個Sprint)</span></p>
-"""
-
-        table_rows += f"""
-<tr>
-<td style="width: 120px; vertical-align: top; font-weight: bold;">{html.escape(assignee)}</td>
-<td style="vertical-align: top;">{issues_html}</td>
-</tr>
-"""
-
-    table_html = f"""
-<table data-layout="default" style="width: 100%; border-collapse: collapse;" border="1">
-<tbody>
-{table_rows}
-</tbody>
-</table>
-"""
-    return header_html + table_html
-
-
-def create_confluence_page(domain, email, token, space_key, title, html_content, parent_id=None):
-    """發布頁面至 Confluence"""
-    url = f"{domain.rstrip('/')}/wiki/rest/api/content"
+def update_confluence_page_by_user(domain, email, token, space_key, title, grouped_issues, selected_assignees, current_sprint_num, parent_id=None):
+    """局部更新或補充工單至 Confluence"""
     auth = HTTPBasicAuth(email, token)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    payload = {
-        "type": "page",
+    
+    search_url = f"{domain.rstrip('/')}/wiki/rest/api/content"
+    params = {
+        "spaceKey": space_key,
         "title": title,
-        "space": {"key": space_key},
+        "expand": "body.storage,version,ancestors"
+    }
+    
+    res = requests.get(search_url, params=params, auth=auth)
+    if res.status_code != 200 or not res.json().get('results'):
+        return False, f"找不到名稱為『{title}』的頁面，請確認標題與 Space/層級 選擇是否正確。"
+        
+    results = res.json()['results']
+    target_page = results[0]
+    
+    if parent_id:
+        for p in results:
+            ancestor_ids = [str(anc.get('id')) for anc in p.get('ancestors', [])]
+            if str(parent_id) in ancestor_ids:
+                target_page = p
+                break
+                
+    page_id = target_page['id']
+    current_version = target_page['version']['number']
+    original_html = target_page['body']['storage']['value']
+    
+    soup = BeautifulSoup(original_html, 'html.parser')
+    updated_count = 0
+    added_issues_count = 0
+    
+    rows = soup.find_all('tr')
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) >= 2:
+            first_col_text = cols[0].get_text().strip()
+            
+            for assignee in selected_assignees:
+                if assignee.lower() in first_col_text.lower():
+                    updated_count += 1
+                    target_td = cols[1]
+                    
+                    td_raw_str = str(target_td)
+                    existing_keys = set(re.findall(r'[A-Z0-9]+-\d+', td_raw_str))
+                    
+                    latest_user_issues = grouped_issues.get(assignee, [])
+                    new_issues_to_add = [i for i in latest_user_issues if i.get('key') not in existing_keys]
+                    
+                    if new_issues_to_add:
+                        target_ul = target_td.find('ul')
+                        if not target_ul:
+                            target_ul = soup.new_tag('ul')
+                            target_td.append(target_ul)
+                            
+                        for new_issue in new_issues_to_add:
+                            li_html = build_single_issue_li_html(new_issue, domain)
+                            new_li_soup = BeautifulSoup(li_html, 'html.parser')
+                            target_ul.append(new_li_soup)
+                            added_issues_count += 1
+                    break
+
+    if updated_count == 0:
+        return False, f"未能比對到表格中的成員名稱：{', '.join(selected_assignees)}"
+
+    if added_issues_count == 0:
+        return True, "沒有新工單需要補充，所有項目皆已存在。"
+
+    updated_storage_html = str(soup)
+    update_url = f"{domain.rstrip('/')}/wiki/rest/api/content/{page_id}"
+    
+    payload = {
+        "version": {"number": current_version + 1},
+        "title": title,
+        "type": "page",
         "body": {
             "storage": {
-                "value": html_content,
+                "value": updated_storage_html,
                 "representation": "storage"
             }
         }
     }
-    if parent_id:
-        payload["ancestors"] = [{"id": parent_id}]
-    return requests.post(url, json=payload, headers=headers, auth=auth)
-
+    
+    put_res = requests.put(update_url, json=payload, headers=headers, auth=auth)
+    if put_res.status_code == 200:
+        web_link = f"{domain.rstrip('/')}/wiki{put_res.json().get('_links', {}).get('webui')}"
+        return True, f"成功幫 {', '.join(selected_assignees)} 補上 {added_issues_count} 筆新工單！ [點此前往檢視頁面]({web_link})"
+    else:
+        return False, f"寫入 Confluence 失敗 ({put_res.status_code}): {put_res.text}"
 
 # -----------------------------------------------------------------------------
-# 側邊欄：Atlassian 連線與層級選擇
+# 側邊欄與頁面配置
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 1. Atlassian 連線設定")
     atlassian_url = st.text_input("Atlassian Domain", value=DEFAULT_DOMAIN)
     api_email = st.text_input("API Email", value=DEFAULT_EMAIL)
     api_token = st.text_input("API Token", type="password", help="請至 https://id.atlassian.com 申請 API Token")
-
+    
     st.divider()
     st.header("📌 2. Confluence 位置選擇")
-
+    
     selected_space_key = None
     selected_parent_id = None
-
+    
     if api_token:
         with st.spinner("連線中..."):
             spaces_dict = fetch_confluence_spaces(atlassian_url, api_email, api_token)
-
+            
         if spaces_dict:
             space_keys = list(spaces_dict.keys())
             default_space_idx = next((i for i, k in enumerate(space_keys) if "QA" in k), 0)
+                    
             selected_space_name = st.selectbox("1. 選擇 Confluence Space", space_keys, index=default_space_idx)
             selected_space_key = spaces_dict[selected_space_name]
-
-            # 第一層父頁面 (L1)
+            
             root_pages = fetch_child_pages(atlassian_url, api_email, api_token, space_key=selected_space_key)
             if root_pages:
                 l1_options = ["(無，存放在 Space 根目錄)"] + list(root_pages.keys())
                 idx_l1 = l1_options.index("QA Home") if "QA Home" in l1_options else 0
                 selected_l1 = st.selectbox("2. 選擇頂層父頁面 (L1)", l1_options, index=idx_l1)
-
+                
                 if selected_l1 != "(無，存放在 Space 根目錄)":
                     selected_parent_id = root_pages[selected_l1]
-
-                    # 第二層父頁面 (L2)
+                    
                     l2_pages = fetch_child_pages(atlassian_url, api_email, api_token, parent_id=selected_parent_id)
                     if l2_pages:
                         l2_options = ["(停在此層，做為父頁面)"] + list(l2_pages.keys())
                         idx_l2 = l2_options.index("QA weekly meeting") if "QA weekly meeting" in l2_options else 0
                         selected_l2 = st.selectbox("3. 選擇次層子頁面 (L2)", l2_options, index=idx_l2)
-
+                        
                         if selected_l2 != "(停在此層，做為父頁面)":
                             selected_parent_id = l2_pages[selected_l2]
-
-                            # 第三層父頁面 (L3)
+                            
                             l3_pages = fetch_child_pages(atlassian_url, api_email, api_token, parent_id=selected_parent_id)
                             if l3_pages:
                                 l3_options = ["(停在此層，做為父頁面)"] + list(l3_pages.keys())
                                 idx_l3 = l3_options.index("2026年工作周報") if "2026年工作周報" in l3_options else 0
                                 selected_l3 = st.selectbox("4. 選擇第三層子頁面 (L3)", l3_options, index=idx_l3)
-
+                                
                                 if selected_l3 != "(停在此層，做為父頁面)":
                                     selected_parent_id = l3_pages[selected_l3]
         else:
@@ -334,79 +375,79 @@ with st.sidebar:
     else:
         st.info("👈 請先輸入 API Token 以載入目錄")
 
-
 # -----------------------------------------------------------------------------
-# 主要表單：生成條件設定
+# 主要區域
 # -----------------------------------------------------------------------------
-st.header("1. 選擇生成條件")
-
+st.header("1. 選擇生成與更新條件")
 col1, col2 = st.columns(2)
 
 with col1:
     department = st.selectbox("部門", list(TEAM_MEMBERS.keys()))
-
 with col2:
     sprint_num = st.number_input("Sprint 號碼", min_value=1, max_value=200, value=53)
 
-page_title = f"AP Sprint {sprint_num} {department}週會"
+target_page_title = st.text_input("要補充工單的 Confluence 頁面標題", value=f"Sprint {sprint_num} {department}週會")
 
-# -----------------------------------------------------------------------------
-# 步驟 1：抓取與預覽
-# -----------------------------------------------------------------------------
 st.header("2. 資料抓取與成員選擇")
 
-if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
+if st.button("🔍 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
         with st.spinner(f"正檢索 Jira 中包含 Sprint {sprint_num} 的 [{department}] 工單..."):
-            all_issues = fetch_all_active_jira_issues(atlassian_url, api_email, api_token, sprint_num)
-
-        if all_issues:
-            grouped_dept_issues, debug_found_assignees = filter_and_group_by_dept(all_issues, department)
-
-            if grouped_dept_issues:
-                st.session_state.jira_issues = all_issues
-                st.session_state.grouped_issues = grouped_dept_issues
-                st.success(f"🎉 成功撈取！已成功找到 {len(grouped_dept_issues)} 位成員的工單！")
+            all_issues = fetch_all_active_jira_issues(atlassian_url, api_email, api_token)
+            if all_issues:
+                grouped_dept_issues, debug_found_assignees = filter_and_group_by_dept(all_issues, department, sprint_num)
+                if grouped_dept_issues:
+                    st.session_state.jira_issues = all_issues
+                    st.session_state.grouped_issues = grouped_dept_issues
+                    st.success(f"🎉 成功抓取！已準備好 {len(grouped_dept_issues)} 位同仁的未完成工單。")
+                else:
+                    st.warning(f"已抓取到工單，但未比對到 Sprint {sprint_num} 的資料。")
             else:
-                st.session_state.jira_issues = None
-                st.session_state.grouped_issues = None
-                st.warning(f"💡 成功連線 Jira 並撈取到 Sprint {sprint_num} 共 {len(all_issues)} 筆進行中工單。但在匹配 [{department}] 成員時未命中。")
-                with st.expander("🔍 檢視 Jira 當前撈到的所有受託人 (Assignees) 清單"):
-                    st.write(list(debug_found_assignees))
-        else:
-            st.session_state.jira_issues = None
-            st.session_state.grouped_issues = None
-            st.warning("無法從 Jira 取得任何工單，請確認帳號權限或 Sprint 號碼是否正確。")
-
-# 呈現選擇成員與排版預覽
-confluence_body = None
+                st.warning("無法取得工單。")
 
 if st.session_state.grouped_issues:
     dept_assignees = sorted(list(st.session_state.grouped_issues.keys()))
+    
+    st.divider()
+    st.subheader("👥 批次更新操作區")
+    
+    selected_assignees = st.multiselect("勾選要批次更新的成員：", options=dept_assignees, default=dept_assignees)
+    
+    if st.button("🚀 批次增補更新所有勾選成員至 Confluence", type="secondary"):
+        if not selected_space_key:
+            st.error("請先選擇 Space！")
+        else:
+            with st.spinner("正在批次比對與補充工單..."):
+                success, msg = update_confluence_page_by_user(
+                    domain=atlassian_url,
+                    email=api_email,
+                    token=api_token,
+                    space_key=selected_space_key,
+                    title=target_page_title,
+                    grouped_issues=st.session_state.grouped_issues,
+                    selected_assignees=selected_assignees,
+                    current_sprint_num=sprint_num,
+                    parent_id=selected_parent_id
+                )
+                if success:
+                    st.balloons()
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
-    st.subheader("👥 選擇要上傳/匯出的受託人 (Assignees)")
-    selected_assignees = st.multiselect(
-        f"目前僅顯示 `team_config.py` 中 [{department}] 且含有 Sprint {sprint_num} 未完成工單的成員：",
-        options=dept_assignees,
-        default=dept_assignees
-    )
+    st.divider()
+    st.subheader("👤 個人排版預覽與單獨更新 / 複製區")
 
-    if selected_assignees:
-        confluence_body = build_confluence_html(
-            st.session_state.grouped_issues,
-            department,
-            sprint_num,
-            selected_assignees
-        )
-
-        st.subheader("👁️ 排版預覽 (對齊 Confluence 格式)")
-
-        for assignee in selected_assignees:
-            issues = st.session_state.grouped_issues.get(assignee, [])
-            with st.container():
-                st.markdown(f"### **{assignee}**")
+    for idx, assignee in enumerate(dept_assignees):
+        issues = st.session_state.grouped_issues.get(assignee, [])
+        copy_text = generate_user_text_for_copy(issues, atlassian_url)
+        
+        with st.expander(f"👤 {assignee} ({len(issues)} 筆進行中工單)", expanded=True):
+            col_preview, col_action = st.columns([3, 1.2])
+            
+            with col_preview:
                 st.markdown(f"<u>**AP Sprint {sprint_num} :**</u>", unsafe_allow_html=True)
                 for issue in issues:
                     key = issue.get('key')
@@ -415,40 +456,34 @@ if st.session_state.grouped_issues:
                     status_name = fields.get('status', {}).get('name', 'To Do')
                     estimate_str = format_estimate(fields.get('timetracking', {}))
                     st.markdown(f"- **[{key}]** {summary} ` {status_name} ` {estimate_str}")
+                
                 st.markdown(f"<u>**AP Sprint {sprint_num + 1} :**</u>", unsafe_allow_html=True)
                 st.markdown("<span style='color: #FF6600;'>(這個Sprint未完成，會延至下個Sprint)</span>", unsafe_allow_html=True)
-                st.divider()
-
-        with st.expander("📄 查看原始 Confluence HTML/XML Storage 代碼"):
-            st.code(confluence_body, language="xml")
-
-# -----------------------------------------------------------------------------
-# 步驟 2：寫入 Confluence
-# -----------------------------------------------------------------------------
-st.header("3. 發布至 Confluence")
-st.info(f"將建立頁面標題：**{page_title}**")
-
-if st.button("🚀 2. 正式發布頁面至 Confluence", type="secondary"):
-    if not selected_space_key:
-        st.error("請先於左側選擇 Confluence Space！")
-    elif not confluence_body:
-        st.error("請先完成上方「資料抓取與成員選擇」步驟，確認預覽內容無誤後再發布！")
-    else:
-        with st.spinner("正在發布頁面..."):
-            res = create_confluence_page(
-                domain=atlassian_url,
-                email=api_email,
-                token=api_token,
-                space_key=selected_space_key,
-                title=page_title,
-                html_content=confluence_body,
-                parent_id=selected_parent_id
-            )
-
-        if res.status_code in [200, 201]:
-            page_data = res.json()
-            web_link = f"{atlassian_url.rstrip('/')}/wiki{page_data.get('_links', {}).get('webui')}"
-            st.balloons()
-            st.success(f"🎉 頁面已成功發布！ [點此前往 Confluence 檢視頁面]({web_link})")
-        else:
-            st.error(f"Confluence 發布失敗 ({res.status_code}): {res.text}")
+            
+            with col_action:
+                st.write("**單獨操作選項**")
+                
+                # 1. 單獨更新按鈕
+                if st.button(f"🚀 僅更新 {assignee}", key=f"btn_update_{assignee}"):
+                    if not selected_space_key:
+                        st.error("請先選擇 Space！")
+                    else:
+                        with st.spinner(f"更新 {assignee} 中..."):
+                            success, msg = update_confluence_page_by_user(
+                                domain=atlassian_url,
+                                email=api_email,
+                                token=api_token,
+                                space_key=selected_space_key,
+                                title=target_page_title,
+                                grouped_issues=st.session_state.grouped_issues,
+                                selected_assignees=[assignee],
+                                current_sprint_num=sprint_num,
+                                parent_id=selected_parent_id
+                            )
+                            if success:
+                                st.success(msg)
+                            else:
+                                st.error(msg)
+                
+                # 2. 僅複製工單 URL 與估時
+                render_copy_button(f"📋 複製 {assignee} 工單連結", copy_text, f"copy_{idx}")
