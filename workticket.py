@@ -57,8 +57,27 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     except Exception:
         return {}
 
-def fetch_jira_issues(domain, email, token, sprint_num, department):
-    """使用最新 Jira POST /rest/api/3/search/jql API 撈取 Issue (並根據部門過濾)"""
+def fetch_user_profile(domain, email, token, account_id):
+    """向 Jira API 查詢使用者的 Profile（包含 department 與 jobTitle）"""
+    url = f"{domain.rstrip('/')}/rest/api/3/user"
+    auth = HTTPBasicAuth(email, token)
+    headers = {"Accept": "application/json"}
+    params = {"accountId": account_id, "expand": "groups"}
+    
+    try:
+        res = requests.get(url, headers=headers, params=params, auth=auth)
+        if res.status_code == 200:
+            data = res.json()
+            return {
+                "department": data.get("department", ""),
+                "jobTitle": data.get("jobTitle", "")
+            }
+    except Exception:
+        pass
+    return {"department": "", "jobTitle": ""}
+
+def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
+    """從 Jira 撈取特定 Sprint 的所有 Issue"""
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
     headers = {
@@ -66,40 +85,57 @@ def fetch_jira_issues(domain, email, token, sprint_num, department):
         "Content-Type": "application/json"
     }
     
-    # 加入 Component / Label 部門過濾邏輯
-    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") AND (component = "{department}" OR labels = "{department}") ORDER BY assignee ASC'
+    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
     
     payload = {
         "jql": jql,
         "maxResults": 100,
-        "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "components", "labels"]
+        "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
     }
     
     response = requests.post(url, json=payload, headers=headers, auth=auth)
-    
-    # 若依據 Component/Label 過濾無結果或報錯，降級為純 Sprint 搜尋
-    if response.status_code != 200 or not response.json().get('issues', []):
-        fallback_jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
-        payload["jql"] = fallback_jql
-        response = requests.post(url, json=payload, headers=headers, auth=auth)
-
     if response.status_code == 200:
         return response.json().get('issues', [])
     else:
         st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
         return []
 
-def group_issues_by_assignee(issues):
-    """將 Issue 依據受託人 (Assignee) 分組"""
+def group_and_filter_issues(domain, email, token, issues, target_department, target_title):
+    """
+    將 Issue 按 Assignee 分組，並查詢 Assignee Profile 進行部門與職稱過濾
+    """
     grouped = {}
+    user_profile_cache = {}
+    
     for issue in issues:
         fields = issue.get('fields', {})
         assignee_obj = fields.get('assignee')
-        assignee_name = assignee_obj.get('displayName', 'Unassigned') if assignee_obj else 'Unassigned'
         
-        if assignee_name not in grouped:
-            grouped[assignee_name] = []
-        grouped[assignee_name].append(issue)
+        if not assignee_obj:
+            continue
+            
+        account_id = assignee_obj.get('accountId')
+        display_name = assignee_obj.get('displayName', 'Unassigned')
+        
+        # 查詢 Profile（使用快取避免重複 Request）
+        if account_id not in user_profile_cache:
+            profile = fetch_user_profile(domain, email, token, account_id)
+            user_profile_cache[account_id] = profile
+        else:
+            profile = user_profile_cache[account_id]
+            
+        dept = profile.get("department", "")
+        job_title = profile.get("jobTitle", "")
+        
+        # 比對邏輯：若有填寫部門/職稱則進行比對（不區分大小寫），若 Profile 欄位為空則彈性保留
+        dept_match = not target_department or target_department.lower() in dept.lower() or dept == ""
+        title_match = not target_title or target_title.lower() in job_title.lower() or job_title == ""
+        
+        if dept_match and title_match:
+            if display_name not in grouped:
+                grouped[display_name] = []
+            grouped[display_name].append(issue)
+            
     return grouped
 
 def get_status_color(status_name):
@@ -309,7 +345,7 @@ with col2:
     title = st.selectbox("職稱", ["QA Engineer", "Backend Engineer", "Frontend Engineer", "Product Manager"])
 
 with col3:
-    sprint_num = st.number_input("Sprint 號碼", min_value=1, max_value=200, value=52)
+    sprint_num = st.number_input("Sprint 號碼", min_value=1, max_value=200, value=53)
 
 page_title = f"AP Sprint {sprint_num} {department}週會"
 
@@ -322,16 +358,26 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正從 Jira 撈取 {department} 部門 AP Sprint {sprint_num} 工單..."):
-            issues = fetch_jira_issues(atlassian_url, api_email, api_token, sprint_num, department)
+        with st.spinner(f"正從 Jira 撈取 AP Sprint {sprint_num} 工單並驗證成員 Profile..."):
+            issues = fetch_jira_issues_by_sprint(atlassian_url, api_email, api_token, sprint_num)
+            
             if issues:
-                st.session_state.jira_issues = issues
-                st.session_state.grouped_issues = group_issues_by_assignee(issues)
-                st.success(f"成功抓取 {len(issues)} 個 Issue！")
+                grouped_filtered = group_and_filter_issues(
+                    atlassian_url, api_email, api_token, issues, department, title
+                )
+                
+                if grouped_filtered:
+                    st.session_state.jira_issues = issues
+                    st.session_state.grouped_issues = grouped_filtered
+                    st.success(f"成功撈取工單！已根據 Profile 精準篩選出 {len(grouped_filtered)} 位 [{department} - {title}] 成員。")
+                else:
+                    st.session_state.jira_issues = None
+                    st.session_state.grouped_issues = None
+                    st.warning(f"在 Sprint {sprint_num} 中找不到 Profile 符合部門 '{department}' 且職稱包含 '{title}' 的成員工單。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
-                st.warning(f"在 Jira 中找不到部門 '{department}' 且 Sprint 號碼為 '{sprint_num}' 的工單。")
+                st.warning(f"在 Jira 中找不到 Sprint 號碼為 '{sprint_num}' 的工單。")
 
 # 呈現選擇成員與排版預覽
 if st.session_state.grouped_issues:
