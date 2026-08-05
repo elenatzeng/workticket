@@ -14,7 +14,8 @@ TEAM_MEMBERS = {
     "Back-End": [
         {"name": "Bill", "email": "bi@intellianalyze.com"},
         {"name": "vic", "email": "vc@intellianalyze.com"},
-        {"name": "Vince", "email": "ve@intellianalyze.com"}
+        {"name": "Vince", "email": "ve@intellianalyze.com"},
+        {"name": "pal", "email": "Poul@intellianalyze.com"}
     ],
     "Front-End": [
         {"name": "Tai", "email": "Ti@intellianalyze.com"},
