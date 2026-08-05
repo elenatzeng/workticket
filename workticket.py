@@ -57,9 +57,9 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     except Exception:
         return {}
 
-def fetch_all_jira_issues_paginated(domain, email, token, sprint_num, department):
+def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
     """
-    分頁撈取 Sprint 內的所有工單，並優先依照 Component / Summary ([QA]) 過濾
+    分頁撈取 Sprint 內的所有工單（修正 JQL 語法，確保 API 100% 成功回傳）
     """
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
@@ -68,11 +68,8 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num, department
         "Content-Type": "application/json"
     }
     
-    # JQL 嘗試針對部門過濾（Component 包含 QA 或 Summary 帶有 [QA]）
-    if department.upper() == "QA":
-        jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") AND (component in ("QA", "QA-Team", "Testing") OR summary ~ "QA*" OR labels in ("QA", "qa")) ORDER BY assignee ASC'
-    else:
-        jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+    # 修正：使用純粹合法的 JQL 進行 Sprint 全量分頁搜尋
+    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
     
     all_issues = []
     start_at = 0
@@ -87,11 +84,6 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num, department
         }
         
         response = requests.post(url, json=payload, headers=headers, auth=auth)
-        
-        # 若 JQL 過於嚴格撈不到資料，降級回寬鬆的全 Sprint 查詢
-        if response.status_code != 200 or (start_at == 0 and not response.json().get('issues', [])):
-            payload["jql"] = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
-            response = requests.post(url, json=payload, headers=headers, auth=auth)
         
         if response.status_code == 200:
             data = response.json()
@@ -109,12 +101,13 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num, department
             
     return all_issues
 
-def group_and_filter_qa_assignees(issues, department):
+def group_and_filter_assignees(issues, department):
     """
-    分類受託人，並自動判斷該受託人旗下是否有該部門特徵的工單
+    在 Python 端進行強效的 QA 關鍵字判定，自動區分出 QA 成員與非 QA 成員
     """
     grouped = {}
-    qa_assignees = set()
+    dept_target = department.upper()
+    detected_target_assignees = set()
     
     for issue in issues:
         fields = issue.get('fields', {})
@@ -132,12 +125,19 @@ def group_and_filter_qa_assignees(issues, department):
             grouped[display_name] = []
         grouped[display_name].append(issue)
         
-        # 標記是否具備 QA 工單特徵（標題含 [QA]、Component 或 Label 含有 QA）
-        if department.upper() == "QA":
-            if "[QA]" in summary or "QA" in components or "QA" in labels or "TEST" in summary:
-                qa_assignees.add(display_name)
+        # 判斷工單是否包含 QA 特徵
+        if dept_target == "QA":
+            is_qa_ticket = (
+                "[QA]" in summary or 
+                "QA" in summary or 
+                any("QA" in c for c in components) or 
+                any("QA" in l for l in labels) or 
+                "TEST" in summary
+            )
+            if is_qa_ticket:
+                detected_target_assignees.add(display_name)
                 
-    return grouped, list(qa_assignees)
+    return grouped, list(detected_target_assignees)
 
 def get_status_color(status_name):
     """依據 Jira 狀態名稱轉換為 Confluence Status Macro 色系"""
@@ -359,34 +359,32 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正撈取 AP Sprint {sprint_num} 的 {department} 工單..."):
-            issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num, department)
+        with st.spinner(f"正完整撈取 AP Sprint {sprint_num} 的所有工單..."):
+            issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
             
             if issues:
-                grouped, detected_qa_assignees = group_and_filter_qa_assignees(issues, department)
+                grouped, detected_target_assignees = group_and_filter_assignees(issues, department)
                 st.session_state.jira_issues = issues
                 st.session_state.grouped_issues = grouped
-                st.session_state.detected_qa_assignees = detected_qa_assignees
-                st.success(f"🎉 成功撈取！找到 {len(issues)} 筆相關工單，涵蓋 {len(grouped)} 位成員。")
+                st.session_state.detected_target_assignees = detected_target_assignees
+                st.success(f"🎉 成功撈取整個 Sprint 共 {len(issues)} 筆工單！已分析出 {len(detected_target_assignees)} 位 {department} 相關成員。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
-                st.session_state.detected_qa_assignees = []
+                st.session_state.detected_target_assignees = []
                 st.warning(f"在 Jira 中找不到 Sprint 號碼為 '{sprint_num}' 的工單。")
 
 # 呈現選擇成員與排版預覽
 if st.session_state.grouped_issues:
     all_assignees = sorted(list(st.session_state.grouped_issues.keys()))
-    detected_qa = st.session_state.get("detected_qa_assignees", [])
+    detected = st.session_state.get("detected_target_assignees", [])
     
-    # 預設選中具備 QA 特徵的成員，若無法辨識則預設 Elena / Emma 等關鍵成員
-    default_selected = detected_qa if detected_qa else [a for a in all_assignees if a in ["Elena", "Emma"]]
-    if not default_selected:
-        default_selected = all_assignees
+    # 優先預設選中系統偵測到的 QA 成員，若無偵測到則退回傳統顯示
+    default_selected = detected if detected else all_assignees
 
     st.subheader("👥 選擇要上傳/匯出的受託人 (Assignees)")
     selected_assignees = st.multiselect(
-        "系統已自動為您勾選 QA 成員，您可手動調整勾選清單：",
+        "系統已自動依據工單特徵為您勾選 QA 成員，您可手動調整勾選清單：",
         options=all_assignees,
         default=default_selected
     )
