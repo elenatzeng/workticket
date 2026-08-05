@@ -22,9 +22,10 @@ TEAM_MEMBERS = {
     ],
     "PM": [
         {"name": "Leo", "email": "Lo@intellianalyze.com"},
-        {"name": "kira", "email": "Kir@intellianalyze.com"}
+        {"name": "Kir P", "email": "Kir@intellianalyze.com"}
     ],
     "App": [
         {"name": "Hank", "email": "hk@intellianalyze.com"}
+        {"name": "Eric", "email": "ec@intellianalyze.com"}
     ]
 }
