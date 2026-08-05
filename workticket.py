@@ -58,23 +58,39 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
         return {}
 
 def fetch_user_profile(domain, email, token, account_id):
-    """向 Jira API 查詢使用者的 Profile（包含 department 與 jobTitle）"""
-    url = f"{domain.rstrip('/')}/rest/api/3/user"
+    """使用 user/search API 嘗試取得完整的 User Profile"""
     auth = HTTPBasicAuth(email, token)
     headers = {"Accept": "application/json"}
-    params = {"accountId": account_id}
     
+    # 優先使用 user/search
+    search_url = f"{domain.rstrip('/')}/rest/api/3/user/search"
     try:
-        res = requests.get(url, headers=headers, params=params, auth=auth)
-        if res.status_code == 200:
-            data = res.json()
+        res = requests.get(search_url, headers=headers, params={"accountId": account_id}, auth=auth)
+        if res.status_code == 200 and len(res.json()) > 0:
+            u = res.json()[0]
             return {
-                "department": data.get("department", ""),
-                "jobTitle": data.get("jobTitle", "")
+                "department": u.get("department", ""),
+                "jobTitle": u.get("jobTitle", ""),
+                "displayName": u.get("displayName", "")
             }
     except Exception:
         pass
-    return {"department": "", "jobTitle": ""}
+
+    # 備用：單一 User API
+    user_url = f"{domain.rstrip('/')}/rest/api/3/user"
+    try:
+        res = requests.get(user_url, headers=headers, params={"accountId": account_id}, auth=auth)
+        if res.status_code == 200:
+            u = res.json()
+            return {
+                "department": u.get("department", ""),
+                "jobTitle": u.get("jobTitle", ""),
+                "displayName": u.get("displayName", "")
+            }
+    except Exception:
+        pass
+
+    return {"department": "", "jobTitle": "", "displayName": ""}
 
 def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
     """從 Jira 撈取特定 Sprint 的所有 Issue"""
@@ -90,7 +106,7 @@ def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
     payload = {
         "jql": jql,
         "maxResults": 100,
-        "fields": ["summary", "status", "assignee", "timetracking", "issuetype"]
+        "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "components"]
     }
     
     response = requests.post(url, json=payload, headers=headers, auth=auth)
@@ -102,7 +118,9 @@ def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
 
 def group_and_filter_issues(domain, email, token, issues, target_department, target_title):
     """
-    嚴格過濾：必須在 User Profile 中填寫了對應的部門與職稱才納入
+    過濾受託人：
+    1. 優先檢查 API 回傳的 Profile (department / jobTitle)
+    2. 若 API 被隱私限制回傳空值，則退回檢查 Issue 中的 Components 或預設保留（讓使用者可以在選單二次勾選）
     """
     grouped = {}
     user_profile_cache = {}
@@ -116,6 +134,8 @@ def group_and_filter_issues(domain, email, token, issues, target_department, tar
             
         account_id = assignee_obj.get('accountId')
         display_name = assignee_obj.get('displayName', 'Unassigned')
+        components = fields.get('components', [])
+        component_names = [c.get('name', '').lower() for c in components]
         
         # 快取查詢 User Profile
         if account_id not in user_profile_cache:
@@ -124,14 +144,22 @@ def group_and_filter_issues(domain, email, token, issues, target_department, tar
         else:
             profile = user_profile_cache[account_id]
             
-        dept = profile.get("department", "").strip()
-        job_title = profile.get("jobTitle", "").strip()
+        dept = profile.get("department", "").strip().lower()
+        job_title = profile.get("jobTitle", "").strip().lower()
         
-        # 嚴格判斷：Profile 必須要有值，且需包含指定的部門與職稱關鍵字
-        dept_match = bool(target_department) and (target_department.lower() in dept.lower())
-        title_match = bool(target_title) and (target_title.lower() in job_title.lower())
+        target_dept_lower = target_department.lower()
+        target_title_lower = target_title.lower()
         
-        if dept_match and title_match:
+        # 1. 條件一：Profile 欄位匹配
+        profile_match = (target_dept_lower in dept) or (target_title_lower in job_title)
+        
+        # 2. 條件二：工單上的 Component 匹配 (例如 Component 寫 QA)
+        component_match = any(target_dept_lower in comp for comp in component_names)
+        
+        # 3. 條件三：如果受限無法抓到 Profile (欄位皆為空)，則彈性保留供使用者手動勾選，避免誤殺像 Elena 等成員
+        is_api_restricted = (dept == "" and job_title == "")
+        
+        if profile_match or component_match or is_api_restricted:
             if display_name not in grouped:
                 grouped[display_name] = []
             grouped[display_name].append(issue)
@@ -358,7 +386,7 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正從 Jira 撈取 AP Sprint {sprint_num} 工單並驗證成員 Profile..."):
+        with st.spinner(f"正從 Jira 撈取 AP Sprint {sprint_num} 工單並解析成員..."):
             issues = fetch_jira_issues_by_sprint(atlassian_url, api_email, api_token, sprint_num)
             
             if issues:
@@ -369,11 +397,11 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
                 if grouped_filtered:
                     st.session_state.jira_issues = issues
                     st.session_state.grouped_issues = grouped_filtered
-                    st.success(f"成功撈取！已根據 Profile 嚴格篩選出 {len(grouped_filtered)} 位 [{department} / {title}] 成員。")
+                    st.success(f"成功撈取！已解析出 {len(grouped_filtered)} 位受託人，請於下方進行最終成員確認。")
                 else:
                     st.session_state.jira_issues = None
                     st.session_state.grouped_issues = None
-                    st.warning(f"在 Sprint {sprint_num} 中找不到 Profile 明確填寫部門為 '{department}' 且職稱包含 '{title}' 的成員。")
+                    st.warning(f"在 Sprint {sprint_num} 中找不到符合條件的成員。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
@@ -385,7 +413,7 @@ if st.session_state.grouped_issues:
     
     st.subheader("👥 選擇要上傳/匯出的受託人 (Assignees)")
     selected_assignees = st.multiselect(
-        "請勾選本次週會要包含的成員工單：",
+        "請勾選本次週會要包含的成員工單（您可在這裡移除非 QA 成員）：",
         options=all_assignees,
         default=all_assignees
     )
