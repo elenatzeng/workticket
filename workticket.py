@@ -11,7 +11,7 @@ from team_config import TEAM_MEMBERS
 
 st.set_page_config(page_title="WorkTicket 工單週報 ", layout="wide", page_icon="📋")
 
-st.title("📋 WorkTicket: ")
+st.title("📋 WorkTicket 工單週報總覽 ")
 
 # 預設網域與設定
 DEFAULT_DOMAIN = "https://inta.atlassian.net/"
