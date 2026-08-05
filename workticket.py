@@ -180,7 +180,7 @@ def build_single_issue_li_html(issue, domain):
     return f'<li>{smart_link} {estimate_str}</li>'
 
 def generate_user_text_for_copy(issues, domain):
-    """僅生成工單連結與估時的純文字（供複製）"""
+    """僅生成工單連結與估時的純文字（供一鍵複製）"""
     lines = []
     for issue in issues:
         key = issue.get('key')
@@ -227,7 +227,7 @@ def render_copy_button(button_label, text_to_copy, button_id):
     components.html(html_code, height=45)
 
 def update_confluence_page_by_user(domain, email, token, space_key, title, grouped_issues, selected_assignees, current_sprint_num, parent_id=None):
-    """局部更新或補充工單至 Confluence"""
+    """局部更新或補充工單至 Confluence（精確定位至目標 AP Sprint 標題列表）"""
     auth = HTTPBasicAuth(email, token)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     
@@ -260,6 +260,8 @@ def update_confluence_page_by_user(domain, email, token, space_key, title, group
     updated_count = 0
     added_issues_count = 0
     
+    sprint_header_text = f"AP Sprint {current_sprint_num}"
+
     rows = soup.find_all('tr')
     for row in rows:
         cols = row.find_all('td')
@@ -278,11 +280,30 @@ def update_confluence_page_by_user(domain, email, token, space_key, title, group
                     new_issues_to_add = [i for i in latest_user_issues if i.get('key') not in existing_keys]
                     
                     if new_issues_to_add:
-                        target_ul = target_td.find('ul')
-                        if not target_ul:
+                        target_ul = None
+                        
+                        # 1. 優先尋找 AP Sprint {current_sprint_num} 標題後緊跟著的 <ul>
+                        sprint_elements = target_td.find_all(text=re.compile(sprint_header_text, re.IGNORECASE))
+                        for elem in sprint_elements:
+                            parent_tag = elem.parent
+                            sibling_ul = parent_tag.find_next_sibling('ul')
+                            if sibling_ul:
+                                target_ul = sibling_ul
+                                break
+                        
+                        # 2. 如果指定 Sprint 底下沒有 <ul>，則在該標題後方即時插入一個空的 <ul>
+                        if not target_ul and sprint_elements:
                             target_ul = soup.new_tag('ul')
-                            target_td.append(target_ul)
-                            
+                            sprint_elements[0].parent.insert_after(target_ul)
+                        
+                        # 3. 若找不到任何相關標題，才降級為第一個 <ul> 或直接 append
+                        if not target_ul:
+                            target_ul = target_td.find('ul')
+                            if not target_ul:
+                                target_ul = soup.new_tag('ul')
+                                target_td.append(target_ul)
+
+                        # 插入新工單
                         for new_issue in new_issues_to_add:
                             li_html = build_single_issue_li_html(new_issue, domain)
                             new_li_soup = BeautifulSoup(li_html, 'html.parser')
