@@ -24,6 +24,10 @@ TEAM_MEMBERS = {
     ],
     "PM": [
         {"name": "Leo", "email": "Lo@intellianalyze.com"},
+        {"name": "Mike", "email": "Mik@intellianalyze.com"},
+        {"name": "Ben Koh", "email": "bk@intellianalyze.com", "confluence_name": "Ben"},
+        {"name": "jimc", "email": "ji@intellianalyze.com"},
+        {"name": "ZN Chen", "email": "zn@intellianalyze.com", "confluence_name": "Zean"},
         {"name": "Kir P", "email": "Kir@intellianalyze.com"}
     ],
     "App": [
