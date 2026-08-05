@@ -71,7 +71,7 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
         "Content-Type": "application/json"
     }
     
-    # 使用新版 API 的合法 JQL 語法
+    # JQL 搜尋組合
     jql_options = [
         f'sprint in ("AP Sprint {sprint_num}", "Sprint {sprint_num}", "{sprint_num}") ORDER BY assignee ASC',
         f'sprint = {sprint_num} ORDER BY assignee ASC'
@@ -107,7 +107,6 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
             else:
                 break
         
-        # 若成功撈取到工單則中斷嘗試
         if all_issues:
             break
 
@@ -115,24 +114,37 @@ def fetch_all_jira_issues_paginated(domain, email, token, sprint_num):
 
 def filter_and_group_by_dept(issues, department):
     """
-    僅保留 team_config.py 中指定部門名單內的成員工單
+    1. 僅保留 team_config.py 中指定部門名單內的成員工單
+    2. 僅保留狀態為 'To Do' 或 'In Progress' 的工單
     """
     grouped = {}
     valid_members = TEAM_MEMBERS.get(department, [])
     
+    # 允許顯示的狀態關鍵字與 Category
+    allowed_statuses = ["TO DO", "IN PROGRESS", "IN DEVELOPMENT", "PENDING", "TESTING", "REOPENED"]
+    
     for issue in issues:
         fields = issue.get('fields', {})
         assignee_obj = fields.get('assignee')
+        status_obj = fields.get('status', {})
         
         if not assignee_obj:
             continue
             
         display_name = assignee_obj.get('displayName', 'Unassigned')
+        status_name = status_obj.get('name', '').upper()
+        status_category_key = status_obj.get('statusCategory', {}).get('key', '')  # 'new', 'indeterminate', 'done'
         
-        # 比對 displayName 是否包含 team_config.py 該部門成員名字
+        # 1. 檢查成員是否屬於目標部門
         is_in_dept = any(member.lower() in display_name.lower() for member in valid_members)
         
-        if is_in_dept:
+        # 2. 檢查狀態是否為 To Do 或 In Progress（排除已完成 'done' 的工單）
+        is_valid_status = (
+            status_category_key in ["new", "indeterminate"] or 
+            any(st_key in status_name for st_key in allowed_statuses)
+        ) and status_category_key != "done"
+        
+        if is_in_dept and is_valid_status:
             if display_name not in grouped:
                 grouped[display_name] = []
             grouped[display_name].append(issue)
@@ -359,21 +371,21 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正透過新版 JQL API 撈取 Sprint {sprint_num} 的 [{department}] 成員工單..."):
+        with st.spinner(f"正透過新版 JQL API 撈取 Sprint {sprint_num} 的 [{department}] 成員 (To Do / In Progress) 工單..."):
             all_issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num)
             
             if all_issues:
-                # 僅篩選出屬於該部門 (例如 QA) 名單中的成員工單
+                # 僅篩選出屬於該部門 (例如 QA) 且狀態為 To Do / In Progress 的工單
                 grouped_dept_issues = filter_and_group_by_dept(all_issues, department)
                 
                 if grouped_dept_issues:
                     st.session_state.jira_issues = all_issues
                     st.session_state.grouped_issues = grouped_dept_issues
-                    st.success(f"🎉 成功撈取！已篩選出 {len(grouped_dept_issues)} 位 [{department}] 成員之工單。")
+                    st.success(f"🎉 成功撈取！已篩選出 {len(grouped_dept_issues)} 位 [{department}] 成員之進行中/待辦工單。")
                 else:
                     st.session_state.jira_issues = None
                     st.session_state.grouped_issues = None
-                    st.warning(f"在 Sprint {sprint_num} 的工單中，找不到團隊設定檔 (`team_config.py`) 內指定的 [{department}] 成員。")
+                    st.warning(f"在 Sprint {sprint_num} 中，找不到 [{department}] 成員目前處於 To Do 或 In Progress 狀態的工單。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
@@ -385,7 +397,7 @@ if st.session_state.grouped_issues:
 
     st.subheader("👥 選擇要上傳/匯出的受託人 (Assignees)")
     selected_assignees = st.multiselect(
-        f"目前僅顯示 `team_config.py` 中 [{department}] 的成員，請勾選要發布的人員：",
+        f"目前僅顯示 `team_config.py` 中 [{department}] 且含有未完成工單的成員：",
         options=dept_assignees,
         default=dept_assignees
     )
