@@ -4,6 +4,7 @@ from requests.auth import HTTPBasicAuth
 import html
 import re
 from bs4 import BeautifulSoup
+import streamlit.components.v1 as components
 
 # 匯入團隊組織設定檔
 from team_config import TEAM_MEMBERS
@@ -121,7 +122,6 @@ def filter_and_group_by_dept(issues, department, sprint_num):
         assignee_obj = fields.get('assignee')
         status_obj = fields.get('status', {})
         
-        # 嚴格確認狀態為 To Do 或 In Progress
         status_category = status_obj.get('statusCategory', {}).get('name', '')
         status_name = status_obj.get('name', '')
         
@@ -155,16 +155,6 @@ def filter_and_group_by_dept(issues, department, sprint_num):
             
     return grouped, debug_found_assignees
 
-def get_status_color(status_name):
-    """狀態標籤顏色"""
-    status_upper = status_name.upper()
-    if status_upper in ["DONE", "RESOLVED", "CLOSED"]:
-        return "Green"
-    elif status_upper in ["IN PROGRESS", "IN DEVELOPMENT"]:
-        return "Blue"
-    else:
-        return "Grey"
-
 def format_estimate(timetracking):
     """估時格式化"""
     if not timetracking:
@@ -181,23 +171,17 @@ def format_estimate(timetracking):
     return "待評估"
 
 def build_single_issue_li_html(issue):
-    """建構單一工單的 <li> HTML（僅供發布 API 使用）"""
+    """單純嵌入 jira 巨集，讓 Confluence 自動連動顯示標題與原生 Status 標籤"""
     key = issue.get('key')
     fields = issue.get('fields', {})
-    summary = fields.get('summary', '')
-    status_obj = fields.get('status', {})
-    status_name = status_obj.get('name', 'To Do')
-    status_color = get_status_color(status_name)
     timetracking = fields.get('timetracking', {})
     estimate_str = format_estimate(timetracking)
     
     jira_macro = f'<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">{key}</ac:parameter></ac:structured-macro>'
-    status_macro = f'<ac:structured-macro ac:name="status" ac:schema-version="1"><ac:parameter ac:name="title">{html.escape(status_name)}</ac:parameter><ac:parameter ac:name="colour">{status_color}</ac:parameter></ac:structured-macro>'
-    
-    return f"<li>{jira_macro}: {html.escape(summary)} {status_macro} {estimate_str}</li>"
+    return f"<li>{jira_macro} {estimate_str}</li>"
 
 def generate_user_text_for_copy(issues, current_sprint_num):
-    """生成個人乾淨純文字排版（不含 HTML 代碼，方便手動複製貼上）"""
+    """生成個人乾淨純文字格式"""
     text = f"AP Sprint {current_sprint_num} :\n"
     for issue in issues:
         key = issue.get('key')
@@ -210,6 +194,41 @@ def generate_user_text_for_copy(issues, current_sprint_num):
     next_sprint_num = current_sprint_num + 1
     text += f"\nAP Sprint {next_sprint_num} :\n(這個Sprint未完成，會延至下個Sprint)"
     return text
+
+def render_copy_button(button_label, text_to_copy, button_id):
+    """使用 JavaScript 打造直接複製到剪貼簿的實體按鈕"""
+    escaped_text = text_to_copy.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
+    html_code = f"""
+    <button id="btn_{button_id}" style="
+        background-color: #4CAF50;
+        color: white;
+        padding: 6px 14px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        margin-top: 4px;
+    ">{button_label}</button>
+
+    <script>
+    document.getElementById("btn_{button_id}").onclick = function() {{
+        const text = `{escaped_text}`;
+        navigator.clipboard.writeText(text).then(() => {{
+            const btn = document.getElementById("btn_{button_id}");
+            btn.innerText = "✓ 已複製！";
+            btn.style.backgroundColor = "#2E7D32";
+            setTimeout(() => {{
+                btn.innerText = "{button_label}";
+                btn.style.backgroundColor = "#4CAF50";
+            }}, 2000);
+        }}).catch(err => {{
+            console.error('複製失敗:', err);
+        }});
+    }};
+    </script>
+    """
+    components.html(html_code, height=45)
 
 def update_confluence_page_by_user(domain, email, token, space_key, title, grouped_issues, selected_assignees, current_sprint_num, parent_id=None):
     """局部更新或補充工單至 Confluence"""
@@ -427,7 +446,7 @@ if st.session_state.grouped_issues:
     st.divider()
     st.subheader("👤 個人排版預覽與單獨更新 / 複製區")
 
-    for assignee in dept_assignees:
+    for idx, assignee in enumerate(dept_assignees):
         issues = st.session_state.grouped_issues.get(assignee, [])
         copy_text = generate_user_text_for_copy(issues, sprint_num)
         
@@ -472,6 +491,5 @@ if st.session_state.grouped_issues:
                             else:
                                 st.error(msg)
                 
-                # 2. 複製純文字按鈕 (顯示乾淨純文字排版，點擊右上方圖示複製)
-                st.caption("📋 點擊右上角按鈕複製該員工單文字：")
-                st.code(copy_text, language="text")
+                # 2. 一鍵複製按鈕（不顯示預覽框）
+                render_copy_button(f"📋 複製 {assignee} 文字", copy_text, f"copy_{idx}")
