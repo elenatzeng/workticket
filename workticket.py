@@ -11,7 +11,7 @@ from team_config import TEAM_MEMBERS
 
 st.set_page_config(page_title="WorkTicket - Jira to Confluence 工具", layout="wide", page_icon="📋")
 
-st.title("📋 WorkTicket: Jira to Confluence 週會頁面自動生成器")
+st.title("📋 WorkTicket 工作週報")
 
 # 預設網域與設定
 DEFAULT_DOMAIN = "https://inta.atlassian.net/"
