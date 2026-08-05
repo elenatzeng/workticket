@@ -21,7 +21,7 @@ if "grouped_issues" not in st.session_state:
 # 輔助 API 函式
 # -----------------------------------------------------------------------------
 def fetch_confluence_spaces(domain, email, token):
-    """取得 Confluence 所有團隊/組織 Space 清單"""
+    """取得 Confluence 所有團隊 Space 清單"""
     url = f"{domain.rstrip('/')}/wiki/rest/api/space"
     auth = HTTPBasicAuth(email, token)
     params = {"limit": 100, "type": "global", "status": "current"}
@@ -57,43 +57,10 @@ def fetch_child_pages(domain, email, token, parent_id=None, space_key=None):
     except Exception:
         return {}
 
-def fetch_user_profile(domain, email, token, account_id):
-    """使用 user/search API 嘗試取得完整的 User Profile"""
-    auth = HTTPBasicAuth(email, token)
-    headers = {"Accept": "application/json"}
-    
-    # 優先使用 user/search
-    search_url = f"{domain.rstrip('/')}/rest/api/3/user/search"
-    try:
-        res = requests.get(search_url, headers=headers, params={"accountId": account_id}, auth=auth)
-        if res.status_code == 200 and len(res.json()) > 0:
-            u = res.json()[0]
-            return {
-                "department": u.get("department", ""),
-                "jobTitle": u.get("jobTitle", ""),
-                "displayName": u.get("displayName", "")
-            }
-    except Exception:
-        pass
-
-    # 備用：單一 User API
-    user_url = f"{domain.rstrip('/')}/rest/api/3/user"
-    try:
-        res = requests.get(user_url, headers=headers, params={"accountId": account_id}, auth=auth)
-        if res.status_code == 200:
-            u = res.json()
-            return {
-                "department": u.get("department", ""),
-                "jobTitle": u.get("jobTitle", ""),
-                "displayName": u.get("displayName", "")
-            }
-    except Exception:
-        pass
-
-    return {"department": "", "jobTitle": "", "displayName": ""}
-
-def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
-    """從 Jira 撈取特定 Sprint 的所有 Issue"""
+def fetch_all_jira_issues_paginated(domain, email, token, sprint_num, department):
+    """
+    分頁撈取 Sprint 內的所有工單，並優先依照 Component / Summary ([QA]) 過濾
+    """
     url = f"{domain.rstrip('/')}/rest/api/3/search/jql"
     auth = HTTPBasicAuth(email, token)
     headers = {
@@ -101,29 +68,53 @@ def fetch_jira_issues_by_sprint(domain, email, token, sprint_num):
         "Content-Type": "application/json"
     }
     
-    jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
-    
-    payload = {
-        "jql": jql,
-        "maxResults": 100,
-        "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "components"]
-    }
-    
-    response = requests.post(url, json=payload, headers=headers, auth=auth)
-    if response.status_code == 200:
-        return response.json().get('issues', [])
+    # JQL 嘗試針對部門過濾（Component 包含 QA 或 Summary 帶有 [QA]）
+    if department.upper() == "QA":
+        jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") AND (component in ("QA", "QA-Team", "Testing") OR summary ~ "QA*" OR labels in ("QA", "qa")) ORDER BY assignee ASC'
     else:
-        st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
-        return []
+        jql = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+    
+    all_issues = []
+    start_at = 0
+    max_results = 100
+    
+    while True:
+        payload = {
+            "jql": jql,
+            "startAt": start_at,
+            "maxResults": max_results,
+            "fields": ["summary", "status", "assignee", "timetracking", "issuetype", "components", "labels"]
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, auth=auth)
+        
+        # 若 JQL 過於嚴格撈不到資料，降級回寬鬆的全 Sprint 查詢
+        if response.status_code != 200 or (start_at == 0 and not response.json().get('issues', [])):
+            payload["jql"] = f'sprint in ("Sprint {sprint_num}", "AP Sprint {sprint_num}") ORDER BY assignee ASC'
+            response = requests.post(url, json=payload, headers=headers, auth=auth)
+        
+        if response.status_code == 200:
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
+            
+            total = data.get('total', len(all_issues))
+            start_at += len(issues)
+            
+            if start_at >= total or not issues:
+                break
+        else:
+            st.error(f"Jira API 錯誤 ({response.status_code}): {response.text}")
+            break
+            
+    return all_issues
 
-def group_and_filter_issues(domain, email, token, issues, target_department, target_title):
+def group_and_filter_qa_assignees(issues, department):
     """
-    過濾受託人：
-    1. 優先檢查 API 回傳的 Profile (department / jobTitle)
-    2. 若 API 被隱私限制回傳空值，則退回檢查 Issue 中的 Components 或預設保留（讓使用者可以在選單二次勾選）
+    分類受託人，並自動判斷該受託人旗下是否有該部門特徵的工單
     """
     grouped = {}
-    user_profile_cache = {}
+    qa_assignees = set()
     
     for issue in issues:
         fields = issue.get('fields', {})
@@ -132,39 +123,21 @@ def group_and_filter_issues(domain, email, token, issues, target_department, tar
         if not assignee_obj:
             continue
             
-        account_id = assignee_obj.get('accountId')
         display_name = assignee_obj.get('displayName', 'Unassigned')
-        components = fields.get('components', [])
-        component_names = [c.get('name', '').lower() for c in components]
+        summary = fields.get('summary', '').upper()
+        components = [c.get('name', '').upper() for c in fields.get('components', [])]
+        labels = [l.upper() for l in fields.get('labels', [])]
         
-        # 快取查詢 User Profile
-        if account_id not in user_profile_cache:
-            profile = fetch_user_profile(domain, email, token, account_id)
-            user_profile_cache[account_id] = profile
-        else:
-            profile = user_profile_cache[account_id]
-            
-        dept = profile.get("department", "").strip().lower()
-        job_title = profile.get("jobTitle", "").strip().lower()
+        if display_name not in grouped:
+            grouped[display_name] = []
+        grouped[display_name].append(issue)
         
-        target_dept_lower = target_department.lower()
-        target_title_lower = target_title.lower()
-        
-        # 1. 條件一：Profile 欄位匹配
-        profile_match = (target_dept_lower in dept) or (target_title_lower in job_title)
-        
-        # 2. 條件二：工單上的 Component 匹配 (例如 Component 寫 QA)
-        component_match = any(target_dept_lower in comp for comp in component_names)
-        
-        # 3. 條件三：如果受限無法抓到 Profile (欄位皆為空)，則彈性保留供使用者手動勾選，避免誤殺像 Elena 等成員
-        is_api_restricted = (dept == "" and job_title == "")
-        
-        if profile_match or component_match or is_api_restricted:
-            if display_name not in grouped:
-                grouped[display_name] = []
-            grouped[display_name].append(issue)
-            
-    return grouped
+        # 標記是否具備 QA 工單特徵（標題含 [QA]、Component 或 Label 含有 QA）
+        if department.upper() == "QA":
+            if "[QA]" in summary or "QA" in components or "QA" in labels or "TEST" in summary:
+                qa_assignees.add(display_name)
+                
+    return grouped, list(qa_assignees)
 
 def get_status_color(status_name):
     """依據 Jira 狀態名稱轉換為 Confluence Status Macro 色系"""
@@ -386,36 +359,36 @@ if st.button("🔍 1. 從 Jira 抓取工單資料", type="primary"):
     if not api_token:
         st.warning("請先於左側輸入 API Token！")
     else:
-        with st.spinner(f"正從 Jira 撈取 AP Sprint {sprint_num} 工單並解析成員..."):
-            issues = fetch_jira_issues_by_sprint(atlassian_url, api_email, api_token, sprint_num)
+        with st.spinner(f"正撈取 AP Sprint {sprint_num} 的 {department} 工單..."):
+            issues = fetch_all_jira_issues_paginated(atlassian_url, api_email, api_token, sprint_num, department)
             
             if issues:
-                grouped_filtered = group_and_filter_issues(
-                    atlassian_url, api_email, api_token, issues, department, title
-                )
-                
-                if grouped_filtered:
-                    st.session_state.jira_issues = issues
-                    st.session_state.grouped_issues = grouped_filtered
-                    st.success(f"成功撈取！已解析出 {len(grouped_filtered)} 位受託人，請於下方進行最終成員確認。")
-                else:
-                    st.session_state.jira_issues = None
-                    st.session_state.grouped_issues = None
-                    st.warning(f"在 Sprint {sprint_num} 中找不到符合條件的成員。")
+                grouped, detected_qa_assignees = group_and_filter_qa_assignees(issues, department)
+                st.session_state.jira_issues = issues
+                st.session_state.grouped_issues = grouped
+                st.session_state.detected_qa_assignees = detected_qa_assignees
+                st.success(f"🎉 成功撈取！找到 {len(issues)} 筆相關工單，涵蓋 {len(grouped)} 位成員。")
             else:
                 st.session_state.jira_issues = None
                 st.session_state.grouped_issues = None
+                st.session_state.detected_qa_assignees = []
                 st.warning(f"在 Jira 中找不到 Sprint 號碼為 '{sprint_num}' 的工單。")
 
 # 呈現選擇成員與排版預覽
 if st.session_state.grouped_issues:
-    all_assignees = list(st.session_state.grouped_issues.keys())
+    all_assignees = sorted(list(st.session_state.grouped_issues.keys()))
+    detected_qa = st.session_state.get("detected_qa_assignees", [])
     
+    # 預設選中具備 QA 特徵的成員，若無法辨識則預設 Elena / Emma 等關鍵成員
+    default_selected = detected_qa if detected_qa else [a for a in all_assignees if a in ["Elena", "Emma"]]
+    if not default_selected:
+        default_selected = all_assignees
+
     st.subheader("👥 選擇要上傳/匯出的受託人 (Assignees)")
     selected_assignees = st.multiselect(
-        "請勾選本次週會要包含的成員工單（您可在這裡移除非 QA 成員）：",
+        "系統已自動為您勾選 QA 成員，您可手動調整勾選清單：",
         options=all_assignees,
-        default=all_assignees
+        default=default_selected
     )
     
     if selected_assignees:
