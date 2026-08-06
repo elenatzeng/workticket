@@ -9,9 +9,9 @@ import streamlit.components.v1 as components
 # 匯入團隊組織設定檔
 from team_config import TEAM_MEMBERS
 
-st.set_page_config(page_title="WorkTicket 工單週報 ", layout="wide", page_icon="📋")
+st.set_page_config(page_title="WorkTicket - Jira to Confluence 工具", layout="wide", page_icon="📋")
 
-st.title("📋 WorkTicket 工單週報總覽 ")
+st.title("📋 WorkTicket: Jira to Confluence 週會頁面自動生成器")
 
 # 預設網域與設定
 DEFAULT_DOMAIN = "https://inta.atlassian.net/"
@@ -478,14 +478,10 @@ target_page_title = st.text_input("要補充工單的 Confluence 頁面標題", 
 
 st.header("2. 資料抓取與成員選擇")
 
-col_btn, col_tip = st.columns([1, 4])
-with col_btn:
-    if st.button("🔍 手動刷新資料", type="primary"):
-        with st.spinner(f"正檢索 Jira 中包含 Sprint {sprint_num} 的 [{department}] 工單..."):
-            run_jira_query()
-            st.success("刷新完成！")
-with col_tip:
-    st.caption("⚡ 提示：修改上方「部門」或「Sprint 號碼」時，系統會自動重新查詢工單！")
+if st.button("🔍 手動刷新資料", type="primary"):
+    with st.spinner(f"正檢索 Jira 中包含 Sprint {sprint_num} 的 [{department}] 工單..."):
+        run_jira_query()
+        st.success("刷新完成！")
 
 if st.session_state.grouped_issues is not None:
     if not st.session_state.grouped_issues:
