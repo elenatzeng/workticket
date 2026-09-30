@@ -9,7 +9,8 @@ TEAM_MEMBERS = {
         {"name": "Emma", "email": "ema@intellianalyze.com", "confluence_name": "Emma"},
         {"name": "Esther", "email": "Est@intellianalyze.com"},
         {"name": "Baron", "email": "ba@intellianalyze.com"},
-        {"name": "Cooper", "email": "CP@intellianalyze.com"}
+        {"name": "Cooper", "email": "CP@intellianalyze.com"},
+        {"name": "Arie", "email": "arie@intellianalyze.com"}
     ],
     "Back-End": [
         {"name": "Bill", "email": "bi@intellianalyze.com"},
