@@ -189,7 +189,7 @@ def filter_and_group_by_dept(issues, department, sprint_num):
 def format_estimate(timetracking):
     """估時格式化"""
     if not timetracking:
-        return "待評估"
+        return "估时："
     original_estimate = timetracking.get('originalEstimate')
     if original_estimate:
         return f"估時：{original_estimate}"
@@ -199,7 +199,7 @@ def format_estimate(timetracking):
         if days.is_integer():
             days = int(days)
         return f"估時：{days}D"
-    return "待評估"
+    return "估时："
 
 def build_single_issue_li_html(issue, domain):
     """使用 Confluence 原生 Smart Link 格式 (data-card-appearance="inline")"""
