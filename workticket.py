@@ -25,7 +25,7 @@ if "grouped_issues" not in st.session_state:
 if "dept_key" not in st.session_state:
     st.session_state.dept_key = list(TEAM_MEMBERS.keys())[0]
 if "sprint_key" not in st.session_state:
-    st.session_state.sprint_key = 57
+    st.session_state.sprint_key = 59
 
 # -----------------------------------------------------------------------------
 # 輔助 API 函式
