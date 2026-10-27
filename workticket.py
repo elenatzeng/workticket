@@ -192,13 +192,13 @@ def format_estimate(timetracking):
         return "估时："
     original_estimate = timetracking.get('originalEstimate')
     if original_estimate:
-        return f"估時：{original_estimate}"
+        return f"估时：{original_estimate}"
     seconds = timetracking.get('originalEstimateSeconds')
     if seconds:
         days = round(seconds / (8 * 3600), 1)
         if days.is_integer():
             days = int(days)
-        return f"估時：{days}D"
+        return f"估时：{days}D"
     return "估时："
 
 def build_single_issue_li_html(issue, domain):
