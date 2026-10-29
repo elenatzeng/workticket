@@ -4,6 +4,7 @@
 
 TEAM_MEMBERS = {
     "QA": [
+        {"name": "Eson", "email": "esn@intellianalyze.com"},
         {"name": "Elena", "email": "ela@intellianalyze.com"},
         {"name": "Katty", "email": "kh@intellianalyze.com"},
         {"name": "Emma", "email": "ema@intellianalyze.com", "confluence_name": "Emma"},
